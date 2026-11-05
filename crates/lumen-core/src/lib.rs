@@ -111,16 +111,20 @@ pub struct Selection {
     pub elapsed: Duration,
 }
 
-async fn probe(host: &str, strategy: Strategy) -> Result<()> {
+async fn probe(host: &str, path: &str, strategy: Strategy) -> Result<()> {
     let roots = rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     let config = rustls::ClientConfig::builder().with_root_certificates(roots).with_no_client_auth();
     let connector = TlsConnector::from(Arc::new(config));
     let socket = connect(host, 443, strategy).await?;
     let mut tls = connector.connect(ServerName::try_from(host.to_owned())?, socket).await?;
-    tls.write_all(format!("HEAD / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n").as_bytes()).await?;
+    tls.write_all(format!("HEAD {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n").as_bytes()).await?;
     let mut prefix = [0u8; 12];
     tls.read_exact(&mut prefix).await?;
-    if !prefix.starts_with(b"HTTP/1.") || !prefix[9..12].iter().all(u8::is_ascii_digit) {
+    validate_probe_prefix(&prefix)
+}
+
+fn validate_probe_prefix(prefix: &[u8; 12]) -> Result<()> {
+    if !(prefix.starts_with(b"HTTP/1.0 ") || prefix.starts_with(b"HTTP/1.1 ")) || !prefix[9..12].iter().all(u8::is_ascii_digit) {
         bail!("invalid HTTP response");
     }
     let status = std::str::from_utf8(&prefix[9..12])?.parse::<u16>()?;
@@ -134,8 +138,8 @@ pub async fn select() -> Result<Selection> {
     for strategy in CANDIDATES {
         let started = Instant::now();
         let mut success = true;
-        for host in ["www.youtube.com", "i.ytimg.com"] {
-            match timeout(Duration::from_secs(12), probe(host, strategy)).await {
+        for (host, path) in [("www.youtube.com", "/"), ("i.ytimg.com", "/vi/dQw4w9WgXcQ/hqdefault.jpg")] {
+            match timeout(Duration::from_secs(12), probe(host, path, strategy)).await {
                 Ok(Ok(())) => (),
                 result => {
                     tracing::warn!(?strategy, host, ?result, "probe failed");
@@ -245,6 +249,16 @@ mod tests {
     async fn all_transports_reject_untrusted_certificates() {
         for strategy in CANDIDATES {
             timeout(Duration::from_secs(10), tls_roundtrip(strategy, false)).await.unwrap().unwrap();
+        }
+    }
+
+    #[test]
+    fn validates_probe_response_syntax_and_status() {
+        for prefix in [b"HTTP/1.1 200", b"HTTP/1.0 204", b"HTTP/1.1 302"] {
+            assert!(validate_probe_prefix(prefix).is_ok());
+        }
+        for prefix in [b"HTTP/1.1 404", b"HTTP/1.1 503", b"HTTP/1.x 200", b"HTTP/1.1x200", b"HTTP/1.1 xyz"] {
+            assert!(validate_probe_prefix(prefix).is_err());
         }
     }
 

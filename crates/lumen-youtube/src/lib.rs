@@ -1,5 +1,8 @@
-//! Anonymous search metadata. YouTube's HTML schema is unofficial and may change.
+//! Anonymous search and limited progressive media metadata. YouTube's HTML schema is unofficial and may change.
 //! Requests never fall back to a direct connection, and redirects are not followed.
+mod media;
+pub use media::{PreparedVideo, MediaStream};
+
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use std::{collections::HashSet, net::SocketAddr, time::Duration};
@@ -36,26 +39,36 @@ impl SearchClient {
     pub async fn search(&self, query: &str) -> Result<Vec<Video>> {
         let query = query.trim();
         if query.is_empty() || query.chars().count() > 200 { bail!("query must contain 1–200 characters"); }
-        let mut response = self.0.get("https://www.youtube.com/results")
-            .query(&[("search_query", query), ("hl", "en")])
-            .send().await?.error_for_status()?;
+        let mut url = reqwest::Url::parse("https://www.youtube.com/results")?;
+        url.query_pairs_mut().append_pair("search_query", query).append_pair("hl", "en");
+        let body = self.fetch_html(url).await?;
+        parse_search(&body)
+    }
+
+    async fn fetch_html(&self, url: reqwest::Url) -> Result<String> {
+        let mut response = self.0.get(url).send().await?.error_for_status()?;
         if response.status().is_redirection() { bail!("YouTube redirected the request; consent or login may be required"); }
-        if response.content_length().is_some_and(|size| size > MAX_BODY as u64) { bail!("search response too large"); }
+        if response.content_length().is_some_and(|size| size > MAX_BODY as u64) { bail!("HTML response too large"); }
         let mut body = Vec::new();
         while let Some(chunk) = response.chunk().await? {
-            if body.len() + chunk.len() > MAX_BODY { bail!("search response too large"); }
+            if body.len() + chunk.len() > MAX_BODY { bail!("HTML response too large"); }
             body.extend_from_slice(&chunk);
         }
-        parse_search(std::str::from_utf8(&body).context("search response is not UTF-8")?)
+        String::from_utf8(body).context("HTML response is not UTF-8")
     }
+
 }
 
 /// Find a JSON value after a known script assignment. serde's streaming parser handles
 /// braces and escaped quotes in strings; no brittle brace-counting or greedy regex.
 fn initial_data(html: &str) -> Result<Value> {
+    script_object(html, &["var ytInitialData =", "window[\"ytInitialData\"] =", "ytInitialData ="])
+}
+
+fn script_object(html: &str, markers: &[&str]) -> Result<Value> {
     if html.len() > MAX_BODY { bail!("search response too large"); }
-    for marker in ["var ytInitialData =", "window[\"ytInitialData\"] =", "ytInitialData ="] {
-        for (offset, _) in html.match_indices(marker) {
+    for marker in markers {
+        for (offset, _) in html.match_indices(*marker) {
             let tail = html[offset + marker.len()..].trim_start();
             let mut stream = serde_json::Deserializer::from_str(tail).into_iter::<Value>();
             if let Some(Ok(value)) = stream.next() {
@@ -63,7 +76,11 @@ fn initial_data(html: &str) -> Result<Value> {
             }
         }
     }
-    bail!("YouTube search data missing or changed; consent/challenge pages are not bypassed")
+    bail!("YouTube script data missing or changed; consent/challenge pages are not bypassed")
+}
+
+pub fn valid_video_id(id: &str) -> bool {
+    id.len() == 11 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
 fn text(value: &Value) -> String {
@@ -84,7 +101,7 @@ pub fn parse_search(html: &str) -> Result<Vec<Video>> {
         for item in section.pointer("/itemSectionRenderer/contents").and_then(Value::as_array).into_iter().flatten() {
             let Some(renderer) = item.get("videoRenderer") else { continue; };
             let Some(id) = renderer.get("videoId").and_then(Value::as_str) else { continue; };
-            if id.len() != 11 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') { continue; }
+            if !valid_video_id(id) { continue; }
             let title = text(&renderer["title"]);
             if title.is_empty() || !seen.insert(id.to_owned()) { continue; }
             videos.push(Video {

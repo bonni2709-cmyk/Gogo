@@ -27,7 +27,7 @@ slint::slint! {
             Text { text: root.status; color: #a7bfd8; wrap: word-wrap; }
             Button { text: "Retry network check"; enabled: !root.busy && !root.connected; clicked => { root.start(); } }
             LineEdit { text <=> root.query; placeholder-text: "Search YouTube"; enabled: root.connected && !root.searching; }
-            Button { text: root.searching ? "Searching…" : "Search"; enabled: root.connected && !root.searching; clicked => { root.search(root.query); } }
+            Button { text: root.searching ? "Working…" : "Search"; enabled: root.connected && !root.searching; clicked => { root.search(root.query); } }
             Text { text: root.search-status; color: #ffffff; wrap: word-wrap; }
             ListView {
                 for video[index] in root.videos : Rectangle {
@@ -38,17 +38,17 @@ slint::slint! {
                         spacing: 4px;
                         Text { text: video.title; color: #ffffff; overflow: elide; }
                         Text { text: video.subtitle; color: #a7bfd8; overflow: elide; }
-                        Button { text: "Details"; clicked => { root.choose(index); } }
+                        Button { text: "Check stream"; enabled: root.connected && !root.searching; clicked => { root.choose(index); } }
                     }
                 }
             }
             Text { text: root.selected-video; color: #a7bfd8; wrap: word-wrap; }
-            Text { text: "Search preview · playback is not implemented yet"; color: #a7bfd8; wrap: word-wrap; }
+            Text { text: "Stream diagnostics preview · native playback pending"; color: #a7bfd8; wrap: word-wrap; }
         }
     }
 }
 
-enum Command { Start, Search(String) }
+enum Command { Start, Search(String), Prepare(String) }
 
 fn unavailable(weak: &slint::Weak<AppWindow>, message: String) {
     let _ = weak.upgrade_in_event_loop(move |ui| {
@@ -89,6 +89,22 @@ async fn worker(weak: slint::Weak<AppWindow>, mut commands: mpsc::Receiver<Comma
                             }
                             Err(error) => unavailable(&weak, format!("Network unavailable: {error:#}")),
                         }
+                    }
+                    Command::Prepare(id) => {
+                        let result = match search.as_ref() {
+                            Some(client) => match tokio::time::timeout(std::time::Duration::from_secs(75), client.prepare_video(&id)).await {
+                                Ok(result) => result,
+                                Err(_) => Err(anyhow::anyhow!("media preparation timed out")),
+                            },
+                            None => Err(anyhow::anyhow!("network is not ready")),
+                        };
+                        let _ = weak.upgrade_in_event_loop(move |ui| {
+                            ui.set_searching(false);
+                            match result {
+                                Ok(video) => ui.set_selected_video(format!("{} · {}\nMP4 CDN byte verified through proxy.\nNative player integration pending.", video.title, video.quality).into()),
+                                Err(error) => ui.set_selected_video(format!("Video is not prepared: {error:#}").into()),
+                            }
+                        });
                     }
                     Command::Search(query) => {
                         let result = match search.as_ref() {
@@ -153,13 +169,14 @@ pub fn run() -> Result<(), slint::PlatformError> {
         }
     });
     let weak = app.as_weak();
+    let search_sender = sender.clone();
     app.on_search(move |query| {
         if let Some(ui) = weak.upgrade() {
             if !ui.get_connected() || ui.get_searching() { return; }
             if query.trim().is_empty() || query.chars().count() > 200 {
                 ui.set_search_status("Enter 1–200 characters".into()); return;
             }
-            if sender.try_send(Command::Search(query.to_string())).is_ok() {
+            if search_sender.try_send(Command::Search(query.to_string())).is_ok() {
                 ui.set_searching(true);
                 ui.set_search_status("Searching through the verified proxy…".into());
                 ui.set_selected_video("".into());
@@ -172,9 +189,15 @@ pub fn run() -> Result<(), slint::PlatformError> {
     let weak = app.as_weak();
     app.on_choose(move |index| {
         if let Some(ui) = weak.upgrade() {
+            if !ui.get_connected() || ui.get_searching() { return; }
             if let Ok(index) = usize::try_from(index) {
                 if let Some(video) = ui.get_videos().row_data(index) {
-                    ui.set_selected_video(format!("{}\nhttps://www.youtube.com/watch?v={}\nPlayback integration pending", video.title, video.id).into());
+                    if sender.try_send(Command::Prepare(video.id.to_string())).is_ok() {
+                        ui.set_searching(true);
+                        ui.set_selected_video("Resolving progressive MP4 and checking CDN through proxy…".into());
+                    } else {
+                        ui.set_selected_video("Network worker unavailable".into());
+                    }
                 }
             }
         }
