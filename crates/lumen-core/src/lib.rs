@@ -168,7 +168,7 @@ mod tests {
         assert!(connect("youtube.com", 443, Strategy::SplitHello { chunk: 0, delay_ms: 0 }).await.is_err());
     }
 
-    async fn tls_roundtrip(strategy: Strategy) -> Result<()> {
+    async fn tls_roundtrip(strategy: Strategy, trusted: bool) -> Result<()> {
         use tokio::net::TcpListener;
         use tokio_rustls::{TlsAcceptor, rustls::pki_types::PrivatePkcs8KeyDer};
         let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
@@ -190,11 +190,17 @@ mod tests {
             Ok::<_, anyhow::Error>(())
         });
         let mut roots = rustls::RootCertStore::empty();
-        roots.add(cert_der)?;
+        if trusted { roots.add(cert_der)?; }
         let config = rustls::ClientConfig::builder().with_root_certificates(roots).with_no_client_auth();
         let connector = TlsConnector::from(Arc::new(config));
         let socket = transport(TcpStream::connect(address).await?, strategy)?;
-        let mut tls = connector.connect(ServerName::try_from("localhost")?, socket).await?;
+        let handshake = connector.connect(ServerName::try_from("localhost")?, socket).await;
+        if !trusted {
+            assert!(handshake.is_err(), "untrusted TLS certificate must be rejected");
+            assert!(server.await?.is_err());
+            return Ok(());
+        }
+        let mut tls = handshake?;
         tls.write_all(b"ping").await?;
         let mut response = [0; 4];
         tls.read_exact(&mut response).await?;
@@ -206,7 +212,7 @@ mod tests {
     #[tokio::test]
     async fn real_tls_survives_all_transports() {
         for strategy in CANDIDATES {
-            timeout(Duration::from_secs(10), tls_roundtrip(strategy)).await.unwrap().unwrap();
+            timeout(Duration::from_secs(10), tls_roundtrip(strategy, true)).await.unwrap().unwrap();
         }
     }
 
@@ -232,6 +238,13 @@ mod tests {
         }
         for ip in ["142.250.185.78", "2607:f8b0:4005:80a::200e", "2001:4860:4860::8888"] {
             assert!(public_address(ip.parse().unwrap()), "{ip}");
+        }
+    }
+
+    #[tokio::test]
+    async fn all_transports_reject_untrusted_certificates() {
+        for strategy in CANDIDATES {
+            timeout(Duration::from_secs(10), tls_roundtrip(strategy, false)).await.unwrap().unwrap();
         }
     }
 

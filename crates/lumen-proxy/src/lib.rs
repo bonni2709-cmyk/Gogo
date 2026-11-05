@@ -97,4 +97,33 @@ mod tests {
         assert_eq!(response, [5, 255]);
         assert!(task.await.unwrap());
     }
+    #[tokio::test]
+    async fn connect_rejects_loopback_destination() {
+        let (mut client, mut server) = pair().await;
+        let task = tokio::spawn(async move { handshake(&mut server, Strategy::Direct).await.is_err() });
+        client.write_all(b"CONNECT 127.0.0.1:443 HTTP/1.1\r\n\r\n").await.unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        assert!(response.starts_with(b"HTTP/1.1 502"));
+        assert!(task.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn socks_rejects_disallowed_domain() {
+        let (mut client, mut server) = pair().await;
+        let task = tokio::spawn(async move { handshake(&mut server, Strategy::Direct).await.is_err() });
+        client.write_all(&[5, 1, 0]).await.unwrap();
+        let mut greeting = [0; 2];
+        client.read_exact(&mut greeting).await.unwrap();
+        assert_eq!(greeting, [5, 0]);
+        let mut request = vec![5, 1, 0, 3, 9];
+        request.extend_from_slice(b"localhost");
+        request.extend_from_slice(&443u16.to_be_bytes());
+        client.write_all(&request).await.unwrap();
+        let mut response = [0; 10];
+        client.read_exact(&mut response).await.unwrap();
+        assert_eq!(response[1], 2);
+        assert!(task.await.unwrap());
+    }
+
 }
