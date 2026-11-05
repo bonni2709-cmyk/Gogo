@@ -9,3 +9,5 @@ lumen-core = { path = "../lumen-core" }
 lumen-proxy = { path = "../lumen-proxy" }
 tokio.workspace = true
 tracing.workspace = true
+lumen-youtube = { path = "../lumen-youtube" }
+anyhow.workspace = true

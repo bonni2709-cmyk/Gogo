@@ -1,67 +1,184 @@
+use std::rc::Rc;
+use tokio::sync::mpsc;
+
 slint::slint! {
-    import { VerticalBox, Button } from "std-widgets.slint";
+    import { VerticalBox, Button, LineEdit, ListView } from "std-widgets.slint";
+    export struct VideoRow { title: string, subtitle: string, id: string }
     export component AppWindow inherits Window {
         title: "Lumen Tube";
-        width: 480px;
-        height: 360px;
+        width: 560px;
+        height: 700px;
         background: #101827;
-        in-out property <string> status: "Ready for automatic network self-test";
+        in-out property <string> status: "Preparing automatic network self-test…";
         in-out property <bool> busy: false;
+        in-out property <bool> connected: false;
+        in-out property <bool> searching: false;
+        in-out property <string> query;
+        in-out property <string> search-status;
+        in-out property <string> selected-video;
+        in-out property <[VideoRow]> videos;
         callback start();
+        callback search(string);
+        callback choose(int);
         VerticalBox {
-            padding: 24px;
-            spacing: 16px;
+            padding: 20px;
+            spacing: 12px;
             Text { text: "Lumen Tube"; color: #ffffff; font-size: 30px; }
-            Text { text: "Network core preview · no manual transport settings"; color: #a7bfd8; wrap: word-wrap; }
-            Text { text: root.status; color: #ffffff; wrap: word-wrap; }
-            Button { text: "Check network and start proxy"; enabled: !root.busy; clicked => { root.start(); } }
-            Text { text: "YouTube search and playback are not implemented in this preview."; color: #a7bfd8; wrap: word-wrap; }
+            Text { text: root.status; color: #a7bfd8; wrap: word-wrap; }
+            Button { text: "Retry network check"; enabled: !root.busy && !root.connected; clicked => { root.start(); } }
+            LineEdit { text <=> root.query; placeholder-text: "Search YouTube"; enabled: root.connected && !root.searching; }
+            Button { text: root.searching ? "Searching…" : "Search"; enabled: root.connected && !root.searching; clicked => { root.search(root.query); } }
+            Text { text: root.search-status; color: #ffffff; wrap: word-wrap; }
+            ListView {
+                for video[index] in root.videos : Rectangle {
+                    height: 108px;
+                    background: #1b293d;
+                    VerticalBox {
+                        padding: 8px;
+                        spacing: 4px;
+                        Text { text: video.title; color: #ffffff; overflow: elide; }
+                        Text { text: video.subtitle; color: #a7bfd8; overflow: elide; }
+                        Button { text: "Details"; clicked => { root.choose(index); } }
+                    }
+                }
+            }
+            Text { text: root.selected-video; color: #a7bfd8; wrap: word-wrap; }
+            Text { text: "Search preview · playback is not implemented yet"; color: #a7bfd8; wrap: word-wrap; }
         }
     }
 }
 
+enum Command { Start, Search(String) }
+
+fn unavailable(weak: &slint::Weak<AppWindow>, message: String) {
+    let _ = weak.upgrade_in_event_loop(move |ui| {
+        ui.set_status(message.into());
+        ui.set_busy(false);
+        ui.set_connected(false);
+        ui.set_searching(false);
+    });
+}
+
+async fn worker(weak: slint::Weak<AppWindow>, mut commands: mpsc::Receiver<Command>) {
+    let mut proxy: Option<tokio::task::JoinHandle<anyhow::Result<()>>> = None;
+    let mut search: Option<lumen_youtube::SearchClient> = None;
+    loop {
+        tokio::select! {
+            command = commands.recv() => {
+                let Some(command) = command else { break; };
+                match command {
+                    Command::Start => {
+                        if search.is_some() { continue; }
+                        let result = async {
+                            let selection = lumen_core::select().await?;
+                            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+                            let address = listener.local_addr()?;
+                            let client = lumen_youtube::SearchClient::new(address)?;
+                            Ok::<_, anyhow::Error>((selection, listener, address, client))
+                        }.await;
+                        match result {
+                            Ok((selection, listener, address, client)) => {
+                                proxy = Some(tokio::spawn(lumen_proxy::serve(listener, selection.strategy)));
+                                search = Some(client);
+                                let message = format!("Transport: {:?} · proxy {}", selection.strategy, address);
+                                let _ = weak.upgrade_in_event_loop(move |ui| {
+                                    ui.set_status(message.into());
+                                    ui.set_busy(false);
+                                    ui.set_connected(true);
+                                });
+                            }
+                            Err(error) => unavailable(&weak, format!("Network unavailable: {error:#}")),
+                        }
+                    }
+                    Command::Search(query) => {
+                        let result = match search.as_ref() {
+                            Some(client) => client.search(&query).await,
+                            None => Err(anyhow::anyhow!("network is not ready")),
+                        };
+                        let _ = weak.upgrade_in_event_loop(move |ui| {
+                            ui.set_searching(false);
+                            match result {
+                                Ok(videos) => {
+                                    ui.set_search_status(format!("{} video(s)", videos.len()).into());
+                                    let rows: Vec<VideoRow> = videos.into_iter().map(|video| VideoRow {
+                                        title: video.title.into(),
+                                        subtitle: format!("{} · {}", video.channel, video.duration).into(),
+                                        id: video.id.into(),
+                                    }).collect();
+                                    ui.set_videos(Rc::new(slint::VecModel::from(rows)).into());
+                                }
+                                Err(error) => ui.set_search_status(format!("Search failed: {error:#}").into()),
+                            }
+                        });
+                    }
+                }
+            }
+            result = async {
+                match proxy.as_mut() {
+                    Some(task) => task.await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                proxy = None;
+                search = None;
+                unavailable(&weak, format!("Local proxy stopped: {result:?}"));
+            }
+        }
+    }
+    if let Some(proxy) = proxy { proxy.abort(); }
+}
+
 pub fn run() -> Result<(), slint::PlatformError> {
+    use slint::Model;
     let app = AppWindow::new()?;
+    let (sender, receiver) = mpsc::channel(4);
+    let weak = app.as_weak();
+    std::thread::spawn(move || {
+        match tokio::runtime::Runtime::new() {
+            Ok(runtime) => runtime.block_on(worker(weak, receiver)),
+            Err(error) => unavailable(&weak, format!("Runtime unavailable: {error}")),
+        }
+    });
+    let start_sender = sender.clone();
     let weak = app.as_weak();
     app.on_start(move || {
-        let weak = weak.clone();
         if let Some(ui) = weak.upgrade() {
-            if ui.get_busy() { return; }
-            ui.set_busy(true);
-            ui.set_status("Testing TLS connectivity…".into());
+            if ui.get_busy() || ui.get_connected() { return; }
+            if start_sender.try_send(Command::Start).is_ok() {
+                ui.set_busy(true);
+                ui.set_status("Testing TLS connectivity…".into());
+            } else {
+                ui.set_status("Network worker unavailable".into());
+            }
         }
-        std::thread::spawn(move || {
-            let runtime = match tokio::runtime::Runtime::new() {
-                Ok(runtime) => runtime,
-                Err(error) => {
-                    let message = error.to_string();
-                    let _ = weak.upgrade_in_event_loop(move |ui| {
-                        ui.set_status(message.into()); ui.set_busy(false);
-                    });
-                    return;
-                }
-            };
-            runtime.block_on(async move {
-                let result = async {
-                    let selection = lumen_core::select().await?;
-                    // Same port accepts CONNECT or SOCKS5. No external interfaces.
-                    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-                    let address = listener.local_addr()?;
-                    let message = format!("Verified: {:?}\nLocal proxy: {}\nPlayer integration pending", selection.strategy, address);
-                    let _ = weak.upgrade_in_event_loop(move |ui| ui.set_status(message.into()));
-                    lumen_proxy::serve(listener, selection.strategy).await
-                }.await;
-                if let Err(error) = result {
-                    let message = format!("Network unavailable: {error:#}");
-                    tracing::warn!(%message);
-                    let _ = weak.upgrade_in_event_loop(move |ui| {
-                        ui.set_status(message.into()); ui.set_busy(false);
-                    });
-                }
-            });
-        });
     });
-    // Defer until the event loop starts, so background updates can be delivered.
+    let weak = app.as_weak();
+    app.on_search(move |query| {
+        if let Some(ui) = weak.upgrade() {
+            if !ui.get_connected() || ui.get_searching() { return; }
+            if query.trim().is_empty() || query.chars().count() > 200 {
+                ui.set_search_status("Enter 1–200 characters".into()); return;
+            }
+            if sender.try_send(Command::Search(query.to_string())).is_ok() {
+                ui.set_searching(true);
+                ui.set_search_status("Searching through the verified proxy…".into());
+                ui.set_selected_video("".into());
+                ui.set_videos(Rc::new(slint::VecModel::<VideoRow>::default()).into());
+            } else {
+                ui.set_search_status("Network worker unavailable".into());
+            }
+        }
+    });
+    let weak = app.as_weak();
+    app.on_choose(move |index| {
+        if let Some(ui) = weak.upgrade() {
+            if let Ok(index) = usize::try_from(index) {
+                if let Some(video) = ui.get_videos().row_data(index) {
+                    ui.set_selected_video(format!("{}\nhttps://www.youtube.com/watch?v={}\nPlayback integration pending", video.title, video.id).into());
+                }
+            }
+        }
+    });
     let startup = app.as_weak();
     slint::Timer::single_shot(std::time::Duration::ZERO, move || {
         if let Some(ui) = startup.upgrade() { ui.invoke_start(); }

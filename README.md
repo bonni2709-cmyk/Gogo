@@ -1,6 +1,6 @@
 # Lumen Tube
 
-Rust + Slint, Windows / Android. **Первый этап: сетевое ядро и UI самотестирования, не готовый YouTube-клиент.**
+Rust + Slint, Windows / Android. **Preview: сетевое ядро, самотестирование и поиск видео. Воспроизведения пока нет.**
 
 ## Workspace
 
@@ -8,7 +8,8 @@ Rust + Slint, Windows / Android. **Первый этап: сетевое ядр�
 |---|---|
 | `lumen-core` | TLS-пробы с проверкой сертификатов, автоматический выбор транспорта |
 | `lumen-proxy` | Loopback HTTP CONNECT / SOCKS5, один динамический порт |
-| `lumen-ui` | Общий интерфейс Slint, неблокирующая проверка сети |
+| `lumen-ui` | Общий интерфейс Slint, проверка сети, поиск и список видео |
+| `lumen-youtube` | Анонимный поиск metadata через обязательный loopback-прокси |
 | `lumen-desktop` | Windows entry point |
 | `lumen-android` | Android NativeActivity, arm64, API 26+ |
 
@@ -32,7 +33,7 @@ Rust + Slint, Windows / Android. **Первый этап: сетевое ядр�
 - Код ZeroDPI / sni-spoofing-rust не заимствован и совместимость с ними не заявляется. Обозначения `[reference:N]` в исходном задании не содержали URL.
 - Обход настоящего IP allowlist: изменение ClientHello не делает недоступный IP доступным. Отдельный разрешённый relay/tunnel мог бы потребоваться, но не входит в эту версию.
 - Проверка всех CDN/googlevideo, адаптация к смене сети, кэширование стратегий и автоматическое переключение после отказа активного транспорта.
-- YouTube API, поиск, история, подписки, получение media URL и воспроизведение.
+- Официальный YouTube API, история, подписки, получение media URL и воспроизведение. Поиск metadata реализован через неофициальную HTML-схему, которая может измениться.
 - Android VpnService, TUN forwarding, `protect()` для исключения прокси-сокетов из VPN и JNI-интеграция Media3/ExoPlayer.
 - mpv/WebView на Windows. Внешние прокси-бинарники не используются; никаких плеерных бинарников также нет.
 
@@ -53,8 +54,8 @@ Rust stable; Slint закреплён на 1.9.2. Cargo.lock пока не со�
 
 ```sh
 cargo fmt --all
-cargo test -p lumen-core -p lumen-proxy
-cargo clippy -p lumen-core -p lumen-proxy --all-targets -- -D warnings
+cargo test -p lumen-core -p lumen-proxy -p lumen-youtube
+cargo clippy -p lumen-core -p lumen-proxy -p lumen-youtube --all-targets -- -D warnings
 cargo build -p lumen-desktop --release --target x86_64-pc-windows-msvc
 cargo ndk -t arm64-v8a -p 26 build -p lumen-android --release
 cargo apk build -p lumen-android --target aarch64-linux-android
@@ -66,7 +67,7 @@ Android SDK/NDK/JDK настраиваются workflow. Preview APK подпи�
 
 1. Добиться зелёного CI, зафиксировать Cargo.lock, проверить APK/EXE на устройствах.
 2. Расширить существующие тесты настоящего TLS на loopback: добавить смену сетевых условий и проверку ошибок сертификатов.
-3. Добавить YouTube metadata provider с изолированным API и тестовыми fixtures, затем media resolver и платформенные плееры.
+3. Проверить metadata provider на реальной сети, расширить fixtures, затем добавить media resolver и платформенные плееры.
 4. Встроить автоматическую маршрутизацию плееров; затем Android VpnService с явным системным согласием и обработкой lifecycle.
 5. Реализовывать привилегированные платформенные методы только с отдельным capability detection и сетевыми испытаниями.
 
@@ -79,3 +80,14 @@ Android SDK/NDK/JDK настраиваются workflow. Preview APK подпи�
 Первый запуск: [42084433135](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42084433135) — исходные core tests и Clippy прошли; Android остановился на настройке SDK до компиляции. Linux runner закреплён на Ubuntu 24.04, используется предустановленный SDK вместо отдельного setup action. В запуске 42084805927 расширенные core/proxy tests прошли, но Android остановился на sdkmanager. Добавлены явный путь к инструменту, Java 17 и аннотации SDK-ошибок; эти изменения требуют подтверждения новым CI-прогоном.
 
 В последующие изменения добавлены локальные TLS roundtrip-тесты всех стратегий, отказ при недоверенном сертификате, запрет пересылки не-TLS данных в split-режиме, проверки частных IP/DNS и запрещённых CONNECT/SOCKS5-направлений. Они не требуют внешнего YouTube и выполняются в CI. Статус актуальной версии смотрите в [Actions](https://github.com/bonni2709-cmyk/Gogo/actions).
+
+
+## Поиск видео (новый этап)
+
+После успешного самотестирования доступны поле запроса и список результатов: заголовок, канал, длительность, кнопка деталей с YouTube URL. URL отображается как текст: внешний браузер не запускается, автоматическое прямое соединение не выполняется. Воспроизведение всё ещё не реализовано.
+
+`lumen-youtube` выполняет HTTPS GET `/results?search_query=...` через созданный приложением CONNECT-прокси. Системные proxy settings игнорируются. Нет API-ключа, логина или передачи cookie. Redirect, consent и challenge страницы не обходятся — показывается ошибка. Если прокси недоступен, fallback на прямую сеть запрещён. Ввод ограничен 200 символами, ответ 4 MiB, запрос 25 секундами, выдача 30 уникальными video ID. Полученные названия показываются как обычный текст, не HTML.
+
+Извлекается `ytInitialData` из desktop HTML. Это не официальный стабильный API: изменение схемы, региональный consent или ограничения YouTube могут сделать поиск недоступным даже при успешном сетевом тесте. Отдельные offline fixtures покрывают дедупликацию, невалидные ID, пустую выдачу, изменённую схему, лимит ответа и обязательность proxy. Сетевая работоспособность поиска на реальном YouTube пока не подтверждена.
+
+UI использует один сетевой worker с ограниченной очередью команд. Поиск не блокирует графический поток; повторный запрос блокируется до завершения предыдущего. Proxy task завершается при закрытии UI/worker и отслеживается на предмет неожиданной остановки.

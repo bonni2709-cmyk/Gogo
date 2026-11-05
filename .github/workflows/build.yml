@@ -18,8 +18,8 @@ jobs:
           components: rustfmt, clippy
       - run: cargo fmt --all
       - run: cargo fmt --all -- --check
-      - run: cargo test -p lumen-core -p lumen-proxy
-      - run: cargo clippy -p lumen-core -p lumen-proxy --all-targets -- -D warnings
+      - run: cargo test -p lumen-core -p lumen-proxy -p lumen-youtube
+      - run: cargo clippy -p lumen-core -p lumen-proxy -p lumen-youtube --all-targets -- -D warnings
       - uses: actions/upload-artifact@v4
         with:
           name: verified-source-and-lockfile
@@ -27,6 +27,25 @@ jobs:
             Cargo.lock
             crates/*/src/*.rs
           if-no-files-found: error
+  ui-check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Type-check shared Slint UI
+        shell: bash
+        run: cargo check -p lumen-ui 2>&1 | tee ui.log
+      - name: Publish UI compiler diagnostics
+        if: failure()
+        shell: bash
+        run: |
+          if [ -f ui.log ]; then
+            text=$(tail -c 6000 ui.log)
+            text="${text//'%'/'%25'}"
+            text="${text//$'\n'/'%0A'}"
+            text="${text//$'\r'/'%0D'}"
+            echo "::error::$text"
+          fi
   windows:
     needs: core-tests
     runs-on: windows-latest
