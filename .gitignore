@@ -1,0 +1,5 @@
+/target/
+*.apk
+*.exe
+*.keystore
+local.properties

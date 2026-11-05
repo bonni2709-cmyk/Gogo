@@ -1,0 +1,11 @@
+[package]
+name = "lumen-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[dependencies]
+slint.workspace = true
+lumen-core = { path = "../lumen-core" }
+lumen-proxy = { path = "../lumen-proxy" }
+tokio.workspace = true
+tracing.workspace = true

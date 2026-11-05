@@ -1,0 +1,65 @@
+name: Verify and package Lumen Tube
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  core-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --all
+      - run: cargo fmt --all -- --check
+      - run: cargo test -p lumen-core -p lumen-proxy
+      - run: cargo clippy -p lumen-core -p lumen-proxy --all-targets -- -D warnings
+  windows:
+    needs: core-tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - run: cargo build --release -p lumen-desktop --target x86_64-pc-windows-msvc
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lumen-tube-windows-x64
+          path: |
+            target/x86_64-pc-windows-msvc/release/lumen-desktop.exe
+            Cargo.lock
+          if-no-files-found: error
+  android:
+    needs: core-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: android-actions/setup-android@v3
+      - run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018"
+      - run: |
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+      - run: cargo install cargo-ndk --version 3.5.4 --locked
+      - run: cargo install cargo-apk --version 0.10.0 --locked
+      - name: Cross-compile Rust library through cargo-ndk
+        run: cargo ndk -t arm64-v8a -p 26 build -p lumen-android --release
+      # Debug packaging supplies a CI debug signature. This is NOT a release-signed APK.
+      - name: Package installable preview APK
+        run: cargo apk build -p lumen-android --target aarch64-linux-android
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lumen-tube-android-arm64-preview
+          path: |
+            target/debug/apk/*.apk
+            Cargo.lock
+          if-no-files-found: error

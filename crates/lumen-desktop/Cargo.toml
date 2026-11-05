@@ -1,0 +1,9 @@
+[package]
+name = "lumen-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[dependencies]
+lumen-ui = { path = "../lumen-ui" }
+slint = { workspace = true, features = ["backend-winit"] }
+tracing-subscriber.workspace = true

@@ -1,0 +1,25 @@
+[package]
+name = "lumen-android"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[target.'cfg(target_os = "android")'.dependencies]
+lumen-ui = { path = "../lumen-ui" }
+slint = { workspace = true, features = ["backend-android-activity-06"] }
+android-activity = { version = "0.6", features = ["native-activity"] }
+
+[package.metadata.android]
+package = "app.lumentube.preview"
+apk_name = "lumen-tube-preview"
+build_targets = ["aarch64-linux-android"]
+
+[package.metadata.android.sdk]
+min_sdk_version = 26
+target_sdk_version = 35
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.INTERNET"
