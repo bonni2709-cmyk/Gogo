@@ -4,12 +4,12 @@ Rust + Slint, Windows / Android. **Preview: сетевое ядро, самот�
 
 ## Скачать проверенную CI-сборку
 
-Исходники бинарников: `bd92e6643ae0185635d8495b223b9e131b8d1b3f`.
-[Успешный workflow 42085840430](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42085840430):
+Исходники бинарников: `cdccd8c0b1e4a562038e4c7217c9be5ec5f44977`.
+[Успешный workflow 42087540673](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42087540673):
 
-- [Windows x64 — ZIP с lumen-desktop.exe](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42085840430/artifacts/13443915281) (~4.4 MB).
-- [Android arm64 — ZIP с preview APK](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42085840430/artifacts/13444115470) (~85 MB).
-- [Отформатированные исходники и Cargo.lock](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42085840430/artifacts/13441344682).
+- [Windows x64 — ZIP с lumen-desktop.exe](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42087540673/artifacts/13443323918) (~4.5 MB).
+- [Android arm64 — ZIP с preview APK](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42087540673/artifacts/13442534794) (~85.5 MB).
+- [Отформатированные исходники и Cargo.lock](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42087540673/artifacts/13442608708).
 
 Для скачивания Actions artifacts может потребоваться вход в GitHub; у артефактов ограниченный срок хранения. Это ссылки на CI-артефакты, не постоянные GitHub Releases. Android APK подписан отладочным ключом и требует Android 8+ / arm64. EXE не имеет подписи издателя. Успех сборки **не означает проверку запуска, поиска или обхода DPI на реальном устройстве**.
 
@@ -117,3 +117,8 @@ UI использует один сетевой worker с ограниченно
 Это промежуточный диагностический этап, а не плеер. Нативный player backend и передача ему медиаданных через Rust всё ещё впереди. На современном YouTube прямая progressive выдача может отсутствовать; полноценная поддержка JS signature/n transforms и DASH не реализована.
 
 Дополнительно исправлена CDN-проба самотестирования: вместо корня `i.ytimg.com` проверяется конкретный thumbnail path. HTTP 404 по-прежнему считается ошибкой; это не ослабление проверки доступности.
+
+
+### Подтверждение этапа media diagnostics
+
+[CI 42087540673](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42087540673) завершился успешно: **20 тестов**, Clippy, type-check общего Slint UI и обе платформенные сборки. Ссылки в начале README обновлены на этот запуск. Проверка реального YouTube/CDN из песочницы недоступна, поэтому успешное end-to-end получение видео не заявляется. Запуск APK/EXE и работа player backend на устройствах также пока не проверены.
