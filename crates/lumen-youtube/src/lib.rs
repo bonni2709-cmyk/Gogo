@@ -1,6 +1,8 @@
 //! Anonymous search and limited progressive media metadata. YouTube's HTML schema is unofficial and may change.
 //! Requests never fall back to a direct connection, and redirects are not followed.
 mod media;
+mod playback;
+pub use playback::PlaybackSession;
 pub use media::{PreparedVideo, MediaStream};
 
 use anyhow::{bail, Context, Result};
@@ -19,21 +21,22 @@ pub struct Video {
 }
 
 #[derive(Clone)]
-pub struct SearchClient(reqwest::Client);
+pub struct SearchClient(reqwest::Client, reqwest::Client);
 
 impl SearchClient {
     /// An explicit loopback proxy is mandatory; system/environment proxies are ignored.
     pub fn new(proxy: SocketAddr) -> Result<Self> {
         if !proxy.ip().is_loopback() { bail!("search requires a loopback proxy"); }
-        let client = reqwest::Client::builder()
-            .no_proxy()
-            .proxy(reqwest::Proxy::all(format!("http://{proxy}"))?)
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(8))
-            .timeout(Duration::from_secs(25))
-            .user_agent("Mozilla/5.0 LumenTube/0.1")
-            .build()?;
-        Ok(Self(client))
+        let builder = || -> Result<reqwest::ClientBuilder> {
+            Ok(reqwest::Client::builder()
+                .no_proxy()
+                .proxy(reqwest::Proxy::all(format!("http://{proxy}"))?)
+                .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(Duration::from_secs(8))
+                .read_timeout(Duration::from_secs(20))
+                .user_agent("Mozilla/5.0 LumenTube/0.1"))
+        };
+        Ok(Self(builder()?.timeout(Duration::from_secs(25)).build()?, builder()?.build()?))
     }
 
     pub async fn search(&self, query: &str) -> Result<Vec<Video>> {

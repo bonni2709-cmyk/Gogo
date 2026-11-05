@@ -1,4 +1,6 @@
-use std::rc::Rc;
+use std::{rc::Rc, sync::Arc};
+
+pub type PlayerLauncher = Arc<dyn Fn(lumen_youtube::PlaybackSession) -> anyhow::Result<()> + Send + Sync>;
 use tokio::sync::mpsc;
 
 slint::slint! {
@@ -10,6 +12,7 @@ slint::slint! {
         height: 700px;
         background: #101827;
         in-out property <string> status: "Preparing automatic network self-test…";
+        in-out property <bool> playback-supported: false;
         in-out property <bool> busy: false;
         in-out property <bool> connected: false;
         in-out property <bool> searching: false;
@@ -38,12 +41,12 @@ slint::slint! {
                         spacing: 4px;
                         Text { text: video.title; color: #ffffff; overflow: elide; }
                         Text { text: video.subtitle; color: #a7bfd8; overflow: elide; }
-                        Button { text: "Check stream"; enabled: root.connected && !root.searching; clicked => { root.choose(index); } }
+                        Button { text: root.playback-supported ? "Play" : "Check stream"; enabled: root.connected && !root.searching; clicked => { root.choose(index); } }
                     }
                 }
             }
             Text { text: root.selected-video; color: #a7bfd8; wrap: word-wrap; }
-            Text { text: "Stream diagnostics preview · native playback pending"; color: #a7bfd8; wrap: word-wrap; }
+            Text { text: root.playback-supported ? "Windows WebView2 player · progressive MP4 preview" : "Stream diagnostics · Android native playback pending"; color: #a7bfd8; wrap: word-wrap; }
         }
     }
 }
@@ -59,7 +62,7 @@ fn unavailable(weak: &slint::Weak<AppWindow>, message: String) {
     });
 }
 
-async fn worker(weak: slint::Weak<AppWindow>, mut commands: mpsc::Receiver<Command>) {
+async fn worker(weak: slint::Weak<AppWindow>, mut commands: mpsc::Receiver<Command>, player: Option<PlayerLauncher>) {
     let mut proxy: Option<tokio::task::JoinHandle<anyhow::Result<()>>> = None;
     let mut search: Option<lumen_youtube::SearchClient> = None;
     loop {
@@ -92,16 +95,28 @@ async fn worker(weak: slint::Weak<AppWindow>, mut commands: mpsc::Receiver<Comma
                     }
                     Command::Prepare(id) => {
                         let result = match search.as_ref() {
-                            Some(client) => match tokio::time::timeout(std::time::Duration::from_secs(75), client.prepare_video(&id)).await {
+                            Some(client) => match tokio::time::timeout(std::time::Duration::from_secs(75), async {
+                                if let Some(launch) = player.as_ref() {
+                                    let stream = client.prepare_stream(&id).await?;
+                                    let metadata = stream.metadata.clone();
+                                    let session = lumen_youtube::PlaybackSession::start(client.clone(), stream).await?;
+                                    // A dedicated Windows UI thread owns the session until its window closes.
+                                    launch(session)?;
+                                    Ok(metadata)
+                                } else {
+                                    client.prepare_video(&id).await
+                                }
+                            }).await {
                                 Ok(result) => result,
                                 Err(_) => Err(anyhow::anyhow!("media preparation timed out")),
                             },
                             None => Err(anyhow::anyhow!("network is not ready")),
                         };
+                        let playing = player.is_some();
                         let _ = weak.upgrade_in_event_loop(move |ui| {
                             ui.set_searching(false);
                             match result {
-                                Ok(video) => ui.set_selected_video(format!("{} · {}\nMP4 CDN byte verified through proxy.\nNative player integration pending.", video.title, video.quality).into()),
+                                Ok(video) => ui.set_selected_video(format!("{} · {}\n{}", video.title, video.quality, if playing { "Player window opened. Use its native controls to play/pause/seek." } else { "MP4 CDN byte verified. Android player integration pending." }).into()),
                                 Err(error) => ui.set_selected_video(format!("Video is not prepared: {error:#}").into()),
                             }
                         });
@@ -144,14 +159,17 @@ async fn worker(weak: slint::Weak<AppWindow>, mut commands: mpsc::Receiver<Comma
     if let Some(proxy) = proxy { proxy.abort(); }
 }
 
-pub fn run() -> Result<(), slint::PlatformError> {
+pub fn run() -> Result<(), slint::PlatformError> { run_with_player(None) }
+
+pub fn run_with_player(player: Option<PlayerLauncher>) -> Result<(), slint::PlatformError> {
     use slint::Model;
     let app = AppWindow::new()?;
+    app.set_playback_supported(player.is_some());
     let (sender, receiver) = mpsc::channel(4);
     let weak = app.as_weak();
     std::thread::spawn(move || {
         match tokio::runtime::Runtime::new() {
-            Ok(runtime) => runtime.block_on(worker(weak, receiver)),
+            Ok(runtime) => runtime.block_on(worker(weak, receiver, player)),
             Err(error) => unavailable(&weak, format!("Runtime unavailable: {error}")),
         }
     });

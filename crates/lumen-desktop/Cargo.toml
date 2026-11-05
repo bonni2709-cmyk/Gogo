@@ -7,3 +7,4 @@ license.workspace = true
 lumen-ui = { path = "../lumen-ui" }
 slint = { workspace = true, features = ["backend-winit"] }
 tracing-subscriber.workspace = true
+lumen-player = { path = "../lumen-player" }

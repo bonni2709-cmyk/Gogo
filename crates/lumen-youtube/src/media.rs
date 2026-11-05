@@ -113,13 +113,25 @@ impl SearchClient {
         Ok(stream.metadata.clone())
     }
 
-    pub async fn prepare_video(&self, id: &str) -> Result<PreparedVideo> {
+    pub async fn prepare_stream(&self, id: &str) -> Result<MediaStream> {
         // Bound CDN checks and stop at the first working progressive format.
         for stream in self.resolve_video(id).await?.iter().take(3) {
-            if let Ok(metadata) = self.inspect_stream(stream).await { return Ok(metadata); }
+            if self.inspect_stream(stream).await.is_ok() { return Ok(stream.clone()); }
         }
         bail!("supported metadata found, but CDN byte checks failed through the proxy")
     }
+
+    pub async fn prepare_video(&self, id: &str) -> Result<PreparedVideo> {
+        Ok(self.prepare_stream(id).await?.metadata)
+    }
+
+    pub(crate) async fn open_media(&self, stream: &MediaStream, range: Option<&str>, head: bool) -> Result<reqwest::Response> {
+        if stream.expires <= current_time()?.saturating_add(5) { bail!("media URL expired"); }
+        let mut request = if head { self.1.head(stream.url.clone()) } else { self.1.get(stream.url.clone()) };
+        if let Some(range) = range { request = request.header(header::RANGE, range); }
+        request.send().await.map_err(reqwest::Error::without_url).map_err(Into::into)
+    }
+
 }
 
 #[cfg(test)]
@@ -168,5 +180,14 @@ mod tests {
         headers.insert(header::CONTENT_RANGE, "bytes 0-0/1024".parse().unwrap());
         headers.insert(header::CONTENT_TYPE, "text/html".parse().unwrap());
         assert!(validate_range(StatusCode::PARTIAL_CONTENT, &headers).is_err());
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_stream() -> MediaStream {
+    MediaStream {
+        metadata: PreparedVideo { video_id: "abcdefghijk".into(), title: "Fixture".into(), quality: "360p".into(), mime: "video/mp4".into() },
+        url: Url::parse("https://rr1.googlevideo.com/videoplayback?expire=9999999999&sig=must-not-leak").unwrap(),
+        expires: 9999999999,
     }
 }

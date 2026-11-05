@@ -9,5 +9,8 @@ anyhow.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots"] }
 serde_json = "1"
 
-[dev-dependencies]
 tokio.workspace = true
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+getrandom = "0.2"
+tokio-util = { version = "0.7", features = ["rt"] }

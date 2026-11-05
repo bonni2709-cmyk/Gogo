@@ -1,0 +1,13 @@
+[package]
+name = "lumen-player"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+lumen-youtube = { path = "../lumen-youtube" }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+tao = "=0.30.8"
+wry = { version = "=0.47.2", default-features = false, features = ["os-webview"] }

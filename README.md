@@ -1,6 +1,6 @@
 # Lumen Tube
 
-Rust + Slint, Windows / Android. **Preview: сетевое ядро, самотестирование и поиск видео. Воспроизведения пока нет.**
+Rust + Slint, Windows / Android. **Preview: сетевое ядро, поиск и Windows WebView2 player для поддержанных progressive MP4. Android playback пока не реализован.**
 
 ## Скачать проверенную CI-сборку
 
@@ -22,6 +22,7 @@ Rust + Slint, Windows / Android. **Preview: сетевое ядро, самот�
 | `lumen-ui` | Общий интерфейс Slint, проверка сети, поиск и список видео |
 | `lumen-youtube` | Анонимный поиск metadata через обязательный loopback-прокси |
 | `lumen-desktop` | Windows entry point |
+| `lumen-player` | Встроенное окно HTML5 video / WebView2 на Windows |
 | `lumen-android` | Android NativeActivity, arm64, API 26+ |
 
 ## Реализовано
@@ -122,3 +123,13 @@ UI использует один сетевой worker с ограниченно
 ### Подтверждение этапа media diagnostics
 
 [CI 42087540673](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42087540673) завершился успешно: **20 тестов**, Clippy, type-check общего Slint UI и обе платформенные сборки. Ссылки в начале README обновлены на этот запуск. Проверка реального YouTube/CDN из песочницы недоступна, поэтому успешное end-to-end получение видео не заявляется. Запуск APK/EXE и работа player backend на устройствах также пока не проверены.
+
+## Windows player и Rust media gateway
+
+Новый crate `lumen-player` открывает отдельное встроенное окно WebView2 на Windows: HTML5 `<video>` с play/pause/seek/volume. Требуется установленный **Microsoft Edge WebView2 Runtime**; он не скачивается приложением автоматически. Если runtime отсутствует, UI сообщает об ошибке. Внешние mpv, браузер и прокси-бинарники не запускаются.
+
+На Windows кнопка результата называется **Play**. Приложение выбирает поддержанный progressive MP4, проверяет CDN, создаёт `PlaybackSession` и передаёт окну только адрес `http://127.0.0.1:<port>/<random-capability>/media`. Ключ сессии содержит 256 случайных бит; URL подписанного CDN остаётся внутри Rust. Gateway ограничен четырьмя активными медиазапросами, проверяет Host и одиночный byte Range, не следует redirect, копирует только Content-Type/Length/Range и не отдаёт CDN cookies/прочие заголовки. Данные передаются потоково с backpressure и ограничением ожидаемой длины, а не загружаются целиком в RAM. Idle timeout — 20 секунд; для длинного видео нет общего 25-секундного timeout метаданных. Переходы к внешним страницам, новые окна, JS и удалённые ресурсы player-документа запрещены. Управление браузерным runtime и его фоновыми службами не входит в Rust transport.
+
+Закрытие player-окна отменяет сессию и закрывает listener/активные медиазапросы. Одновременно разрешено одно player-окно. Срок подписанного URL не обновляется автоматически: после его истечения новые Range-запросы завершатся ошибкой, потребуется повторно открыть видео. UI подтверждает создание окна, **не успешное декодирование**; ошибки самого `<video>` отображаются его нативными controls. Автозапуск может быть ограничен политикой WebView2 — используйте Play в окне плеера.
+
+Android и другие платформы пока сохраняют **Check stream**; Media3/ExoPlayer и VpnService всё ещё не реализованы. Windows playback не снимает ограничений resolver: cipher/n-transform/DASH/live/DRM не поддерживаются. Реальный запуск WebView2, seek и end-to-end YouTube нужно проверить на Windows-устройстве отдельно от компиляции CI.
