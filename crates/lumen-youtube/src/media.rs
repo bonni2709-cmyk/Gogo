@@ -135,6 +135,16 @@ impl SearchClient {
 }
 
 #[cfg(test)]
+pub(crate) fn fixture_stream() -> MediaStream {
+    MediaStream {
+        metadata: PreparedVideo { video_id: "abcdefghijk".into(), title: "Fixture".into(), quality: "360p".into(), mime: "video/mp4".into() },
+        url: Url::parse("https://rr1.googlevideo.com/videoplayback?expire=9999999999&sig=must-not-leak").unwrap(),
+        expires: 9999999999,
+    }
+}
+
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::{json, Value};
@@ -180,14 +190,5 @@ mod tests {
         headers.insert(header::CONTENT_RANGE, "bytes 0-0/1024".parse().unwrap());
         headers.insert(header::CONTENT_TYPE, "text/html".parse().unwrap());
         assert!(validate_range(StatusCode::PARTIAL_CONTENT, &headers).is_err());
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn fixture_stream() -> MediaStream {
-    MediaStream {
-        metadata: PreparedVideo { video_id: "abcdefghijk".into(), title: "Fixture".into(), quality: "360p".into(), mime: "video/mp4".into() },
-        url: Url::parse("https://rr1.googlevideo.com/videoplayback?expire=9999999999&sig=must-not-leak").unwrap(),
-        expires: 9999999999,
     }
 }

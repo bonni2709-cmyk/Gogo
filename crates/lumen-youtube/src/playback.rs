@@ -56,6 +56,7 @@ fn valid_range(range: &str) -> bool {
     if range.len() > 80 { return false; }
     let Some(value) = range.strip_prefix("bytes=") else { return false; };
     let Some((start, end)) = value.split_once('-') else { return false; };
+    if !start.bytes().all(|b| b.is_ascii_digit()) || !end.bytes().all(|b| b.is_ascii_digit()) { return false; }
     if start.is_empty() { return end.parse::<u64>().is_ok_and(|n| n > 0); }
     let Ok(start) = start.parse::<u64>() else { return false; };
     end.is_empty() || end.parse::<u64>().is_ok_and(|end| end >= start)
@@ -128,7 +129,7 @@ mod tests {
     #[test]
     fn accepts_only_single_bounded_byte_range() {
         for value in ["bytes=0-", "bytes=0-99", "bytes=-1024"] { assert!(valid_range(value)); }
-        for value in ["bytes=", "bytes=-", "bytes=-0", "bytes=10-9", "bytes=0-1,4-9", "bytes=18446744073709551616-", "other=0-1"] { assert!(!valid_range(value)); }
+        for value in ["bytes=", "bytes=-", "bytes=-0", "bytes=10-9", "bytes=0-1,4-9", "bytes=18446744073709551616-", "other=0-1", "bytes=+0-1", "bytes=0-+1"] { assert!(!valid_range(value)); }
     }
     #[test]
     fn rejects_bad_media_headers_and_copies_no_tokens() {
