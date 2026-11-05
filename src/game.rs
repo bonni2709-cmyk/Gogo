@@ -367,7 +367,7 @@ fn draw_tiles(world: &World, cam: &Vec2, view: &Vec2) {
                 }
 
                 // Тёмный шов по периметру тайла — чёткая пиксельная сетка.
-                draw_rectangle_lines(x, y, TILE, TILE, STONE_DARK, 1.0);
+                draw_rectangle_lines(x, y, TILE, TILE, 1.0, STONE_DARK);
             }
         }
     }

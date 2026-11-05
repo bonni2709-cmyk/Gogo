@@ -10,14 +10,17 @@ import re
 import sys
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
-MAX_ERRORS = 3
-MAX_LINES_PER_ERROR = 16
+MAX_ERRORS = 8
+MAX_LINES_PER_ERROR = 14
 
 
 def emit(title: str, text: str) -> None:
-    for line in text.splitlines()[:MAX_LINES_PER_ERROR]:
-        # Команды workflow: двойные двоеточия в тексте не должны ломать вывод.
-        print(f"::error title={title}::{line}")
+    """Одна аннотация на ошибку: GitHub ограничивает их число на шаг."""
+    lines = text.splitlines()[:MAX_LINES_PER_ERROR]
+    # %0A — escape перевода строки внутри команды workflow.
+    joined = "%0A".join(line.strip() for line in lines if line.strip())
+    if joined:
+        print(f"::error title={title}::{joined}")
 
 
 def main() -> int:
