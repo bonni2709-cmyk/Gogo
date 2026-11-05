@@ -37,7 +37,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: cargo check
-        run: cargo check --all-targets
+        run: |
+          set +e
+          cargo check --all-targets --message-format=json > check.json 2> check.err
+          status=$?
+          set -e
+          python3 .github/scripts/report_rust_errors.py check.json "$status"
+          exit "$status"
 
       - name: cargo test (ядро физики и контроллер игрока)
         run: cargo test --lib
@@ -85,7 +91,13 @@ jobs:
           keytool -list -keystore release.keystore -storepass voxelknight | head -n 5
 
       - name: Cross-compile with cargo-ndk (arm64-v8a)
-        run: cargo ndk -t arm64-v8a build --release --lib
+        run: |
+          set +e
+          cargo ndk -t arm64-v8a build --release --lib --message-format=json > ndk-build.json 2> ndk-build.err
+          status=$?
+          set -e
+          python3 .github/scripts/report_rust_errors.py ndk-build.json "$status"
+          exit "$status"
 
       - name: Package and sign APK (cargo-apk)
         run: cargo apk build --release --lib
