@@ -26,6 +26,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
     app.on_start(move || {
         let weak = weak.clone();
         if let Some(ui) = weak.upgrade() {
+            if ui.get_busy() { return; }
             ui.set_busy(true);
             ui.set_status("Testing TLS connectivity…".into());
         }
@@ -59,6 +60,11 @@ pub fn run() -> Result<(), slint::PlatformError> {
                 }
             });
         });
+    });
+    // Defer until the event loop starts, so background updates can be delivered.
+    let startup = app.as_weak();
+    slint::Timer::single_shot(std::time::Duration::ZERO, move || {
+        if let Some(ui) = startup.upgrade() { ui.invoke_start(); }
     });
     app.run()
 }
