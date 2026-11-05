@@ -1,0 +1,63 @@
+[package]
+name = "voxel-knight"
+version = "0.1.0"
+edition = "2021"
+authors = ["VOXEL KNIGHT Team"]
+description = "Тёмный 2D-платформер (метроидвания) на Rust + Macroquad для Android"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+
+# cdylib — для Android (cargo-apk пакует libvoxel_knight.so в APK),
+# rlib — чтобы десктопный бинарник linked против библиотеки.
+[lib]
+name = "voxel_knight"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "voxel-knight"
+path = "src/main.rs"
+
+[dependencies]
+macroquad = "0.4.16"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# ------------------------------------------------------------------
+# Android-метаданные для cargo-apk (см. .github/workflows/build.yml)
+# ------------------------------------------------------------------
+[package.metadata.android]
+package = "com.voxelknight.game"
+apk_name = "VoxelKnight"
+build_targets = ["aarch64-linux-android"]
+
+# Release-подпись. Keystore генерируется в CI перед сборкой
+# (шаг Generate release keystore), в репозиторий не коммитится.
+[package.metadata.android.signing.release]
+path = "release.keystore"
+keystore_password = "voxelknight"
+
+[package.metadata.android.application]
+label = "VOXEL KNIGHT"
+theme = "@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen"
+has_code = true
+
+# Java-активность miniquad (vendored в android/java/), а не NativeActivity:
+# макроквад рисует через свой QuadSurface + JNI.
+[package.metadata.android.application.activity]
+name = "com.voxelknight.game.MainActivity"
+orientation = "landscape"
+exported = true
+
+# ------------------------------------------------------------------
+# Профили
+# ------------------------------------------------------------------
+# Даже в dev зависимости оптимизируются — десктопная отладка играбельна.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

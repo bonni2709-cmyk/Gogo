@@ -1,0 +1,18 @@
+# Rust
+/target/
+
+# Подписи (генерируются в CI, в репозиторий не попадают)
+/release.keystore
+/release.keystore.*
+*.keystore
+!android/**/*.keystore
+
+# Сборочные артефакты упаковки APK
+/build/
+/dist/
+
+# Редакторы / ОС
+.idea/
+.vscode/
+*.swp
+.DS_Store

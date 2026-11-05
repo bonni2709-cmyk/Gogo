@@ -1,0 +1,168 @@
+name: Android APK
+
+# Протокол сборки:
+#  1) в песочнице хранится только исходный код;
+#  2) APK собирается здесь: Android NDK + cargo-ndk (кросс-компиляция)
+#     + cargo-apk (упаковка и подпись);
+#  3) Java-часть miniquad (android/java/) компилируется в dex и внедряется
+#     в APK, после чего пакет переподписывается release-ключом;
+#  4) ключ (keystore) генерируется в CI и в репозиторий не коммитится.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Host check + tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies (macroquad/miniquad)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libx11-dev libxi-dev libgl1-mesa-dev libasound2-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo check
+        run: cargo check --all-targets
+
+      - name: cargo test (ядро физики и контроллер игрока)
+        run: cargo test --lib
+
+  apk:
+    name: Build signed APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Set up JDK 17 (javac, d8, apksigner, keytool)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android
+
+      - name: Install cargo-ndk and cargo-apk
+        run: cargo install cargo-ndk cargo-apk --force
+
+      - name: Restore release keystore
+        id: keystore-cache
+        uses: actions/cache@v4
+        with:
+          path: release.keystore
+          key: voxel-knight-release-keystore
+
+      - name: Generate release keystore
+        run: |
+          if [ ! -f release.keystore ]; then
+            keytool -genkeypair -v \
+              -keystore release.keystore \
+              -alias voxelnight \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass voxelknight -keypass voxelknight \
+              -dname "CN=VOXEL KNIGHT, O=VoxelKnight, C=PL"
+          fi
+          keytool -list -keystore release.keystore -storepass voxelknight | head -n 5
+
+      - name: Cross-compile with cargo-ndk (arm64-v8a)
+        run: cargo ndk -t arm64-v8a build --release --lib
+
+      - name: Package and sign APK (cargo-apk)
+        run: cargo apk build --release --lib
+
+      - name: Compile miniquad Java glue and inject dex
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y --no-install-recommends zip
+
+          APK=$(find target -name 'VoxelKnight.apk' -print -quit)
+          if [ -z "$APK" ]; then
+            echo "::error::cargo-apk не произвёл APK (VoxelKnight.apk не найден)"
+            exit 1
+          fi
+          echo "APK from cargo-apk: $APK"
+
+          BT_VER=$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -n 1)
+          BT_DIR="$ANDROID_HOME/build-tools/$BT_VER"
+
+          # android.jar: предпочитаем android-34 (есть на раннере, содержит
+          # WindowInsets.Type.ime() API 30, нужный miniquad MainActivity).
+          if [ -f "$ANDROID_HOME/platforms/android-34/android.jar" ]; then
+            AJAR="$ANDROID_HOME/platforms/android-34/android.jar"
+          else
+            AJAR=$(ls "$ANDROID_HOME"/platforms/android-*/android.jar | sort -V | tail -n 1)
+          fi
+          echo "build-tools: $BT_DIR"
+          echo "android.jar: $AJAR"
+
+          mkdir -p build/glue/classes build/glue/dex
+          sed -e 's/^package TARGET_PACKAGE_NAME;/package com.voxelknight.game;/' \
+              -e 's/System.loadLibrary("LIBRARY_NAME")/System.loadLibrary("voxel_knight")/' \
+              android/java/MainActivity.java > build/glue/MainActivity.java
+          cp android/java/QuadNative.java build/glue/QuadNative.java
+
+          javac -classpath "$AJAR" -d build/glue/classes \
+              build/glue/MainActivity.java build/glue/QuadNative.java
+
+          "$BT_DIR/d8" --min-api 23 --lib "$AJAR" --output build/glue/dex \
+              $(find build/glue/classes -name '*.class' | sort)
+
+          test -f build/glue/dex/classes.dex
+          echo "classes.dex готов: $(wc -c < build/glue/dex/classes.dex) байт"
+
+          # Внедряем dex в пакет, выравниваем и переподписываем release-ключом.
+          cp "$APK" build/base.apk
+          zip -q -j build/base.apk build/glue/dex/classes.dex
+          "$BT_DIR/zipalign" -f 4 build/base.apk build/aligned.apk
+          mkdir -p dist
+          "$BT_DIR/apksigner" sign \
+            --ks release.keystore \
+            --ks-pass pass:voxelknight \
+            --key-pass pass:voxelknight \
+            --out dist/VOXEL-KNIGHT.apk \
+            build/aligned.apk
+          "$BT_DIR/apksigner" verify --verbose dist/VOXEL-KNIGHT.apk
+          ls -lh dist/VOXEL-KNIGHT.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VOXEL-KNIGHT-apk
+          path: dist/VOXEL-KNIGHT.apk
+          if-no-files-found: error
+
+      - name: Publish GitHub Release (apk-latest)
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view apk-latest >/dev/null 2>&1; then
+            gh release upload apk-latest dist/VOXEL-KNIGHT.apk --clobber
+          else
+            gh release create apk-latest dist/VOXEL-KNIGHT.apk \
+              --target "$GITHUB_SHA" \
+              --title "VOXEL KNIGHT — Latest APK" \
+              --notes "Автоматическая сборка подписанного release APK (arm64-v8a)."
+          fi
+          gh release view apk-latest --json assets --jq '.assets[].url'
