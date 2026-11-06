@@ -9,3 +9,5 @@ local.properties
 /android/.gradle/
 /android/app/src/main/jniLibs/
 /android/**/build/
+
+/android/app/src/androidTest/assets/fixture.mp4

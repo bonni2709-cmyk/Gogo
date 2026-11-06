@@ -166,3 +166,11 @@ Android Gradle APK теперь использует **Play** через Media3;
 6. Отключить сеть во время playback: проверить сообщение об ошибке и возможность повторного открытия. После уничтожения процесса не ожидать восстановления старого loopback URL.
 
 Все перечисленные проверки устройства — **ещё не выполнены**. APK отладочно подписан, VpnService не запрашивается и системный трафик не перехватывается.
+
+## Android runtime smoke в эмуляторе
+
+Добавлен отдельный workflow `.github/workflows/android-smoke.yml`: x86_64/API 35 emulator с KVM, отдельная x86_64 Rust-библиотека и instrumentation APK. Публикуемый arm64 APK не меняет ABI и не содержит тестовое видео/тестовый сервер. Короткий H.264/AAC MP4 синтезируется через ffmpeg **только в CI** — runtime-зависимости приложения от ffmpeg нет.
+
+Instrumentation smoke запускает настоящую MainActivity (NativeActivity/Slint), затем PlayerActivity, ожидает Media3 READY/playing, выполняет seek и проверяет release/recreate при stop/resume. Закрытие Activity вызывает настоящий JNI close callback с неизвестным session ID. Отчёты instrumentation и logcat сохраняются отдельным Actions artifact.
+
+Границы теста: fixture отдаёт instrumentation-only Java loopback server, **не production Rust media gateway**. Этот сценарий не проверяет Rust→Java openPlayer вызов, signed CDN URLs, YouTube, DPI или реальные устройства. Он дополняет Rust unit tests шлюза и проверки сборки, а не заменяет end-to-end испытания. До завершения первого smoke workflow его успешность не заявляется.
