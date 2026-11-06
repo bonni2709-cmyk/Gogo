@@ -1,15 +1,15 @@
 # Lumen Tube
 
-Rust + Slint, Windows / Android. **Preview: сетевое ядро, поиск и Windows WebView2 player для поддержанных progressive MP4. Android playback пока не реализован.**
+Rust + Slint, Windows / Android. **Preview: сетевое ядро, поиск, Windows WebView2 и Android Media3 player для поддержанных progressive MP4.**
 
 ## Скачать проверенную CI-сборку
 
-Исходники бинарников: `c2b4aa970430aeee2b38ffa87087b7e2678c5589`.
-[Успешный workflow 42089199084](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42089199084):
+Исходники бинарников: `d9f6836e85bf5fcd568d07a1c31fe1d0c63f06ff`.
+[Успешный workflow 42192758983](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42192758983):
 
-- [Windows x64 — ZIP с lumen-desktop.exe](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42089199084/artifacts/13445411045) (~4.9 MB).
-- [Android arm64 — ZIP с preview APK](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42089199084/artifacts/13444273359) (~90 MB).
-- [Отформатированные исходники и Cargo.lock](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42089199084/artifacts/13445125233).
+- [Windows x64 — ZIP с lumen-desktop.exe](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42192758983/artifacts/13490572546) (~4.9 MB).
+- [Android arm64 — ZIP с preview APK](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42192758983/artifacts/13489819963) (~14.2 MB).
+- [Отформатированные исходники и Cargo.lock](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42192758983/artifacts/13490472472).
 
 Для скачивания Actions artifacts может потребоваться вход в GitHub; у артефактов ограниченный срок хранения. Это ссылки на CI-артефакты, не постоянные GitHub Releases. Android APK подписан отладочным ключом и требует Android 8+ / arm64. EXE не имеет подписи издателя. Успех сборки **не означает проверку запуска, поиска или обхода DPI на реальном устройстве**.
 
@@ -45,11 +45,11 @@ Rust + Slint, Windows / Android. **Preview: сетевое ядро, поиск 
 - Код ZeroDPI / sni-spoofing-rust не заимствован и совместимость с ними не заявляется. Обозначения `[reference:N]` в исходном задании не содержали URL.
 - Обход настоящего IP allowlist: изменение ClientHello не делает недоступный IP доступным. Отдельный разрешённый relay/tunnel мог бы потребоваться, но не входит в эту версию.
 - Проверка всех CDN/googlevideo, адаптация к смене сети, кэширование стратегий и автоматическое переключение после отказа активного транспорта.
-- Официальный YouTube API, история, подписки, полноценный media resolver и Android-воспроизведение. Ограниченный resolver progressive MP4 описан ниже. Поиск metadata реализован через неофициальную HTML-схему, которая может измениться.
-- Android VpnService, TUN forwarding, `protect()` для исключения прокси-сокетов из VPN и JNI-интеграция Media3/ExoPlayer.
-- mpv и внешние плеерные бинарники не используются. Windows WebView2 backend реализован; он требует установленного WebView2 Runtime. На Android нативного player backend пока нет.
+- Официальный YouTube API, история, подписки, полноценный media resolver (cipher/n/DASH/live/DRM). Media3 playback для поддержанных progressive MP4 уже реализован. Ограниченный resolver progressive MP4 описан ниже. Поиск metadata реализован через неофициальную HTML-схему, которая может измениться.
+- Android VpnService, TUN forwarding и `protect()` для исключения прокси-сокетов из VPN. Media3/ExoPlayer и JNI lifecycle bridge реализованы отдельным этапом.
+- mpv и внешние плеерные бинарники не используются. Windows WebView2 backend реализован; он требует установленного WebView2 Runtime. На Android Gradle APK включает Media3 backend; legacy cargo-apk вариант — только диагностику.
 
-**Не обещаем обход любого DPI или «белых списков».** Успешная HEAD-проба не означает доступность видео. На Android сейчас работает только собственный loopback-сервис; системный трафик он не перехватывает. Windows media gateway автоматически направляет CDN-запросы через выбранный транспорт; Android media integration пока впереди.
+**Не обещаем обход любого DPI или «белых списков».** Успешная HEAD-проба не означает доступность видео. На Android сейчас работает только собственный loopback-сервис; системный трафик он не перехватывает. Windows media gateway автоматически направляет CDN-запросы через выбранный транспорт; Android Media3 также получает данные только из локального gateway.
 
 ## Сборка и проверки — только CI
 
@@ -57,7 +57,7 @@ Rust + Slint, Windows / Android. **Preview: сетевое ядро, поиск 
 
 - форматирует исходники в checkout CI, проверяет форматирование, запускает тесты и Clippy сетевых crates;
 - собирает Windows MSVC release `.exe`;
-- компилирует Android arm64 release библиотеку через cargo-ndk, отдельно упаковывает **debug-signed preview APK** через cargo-apk;
+- компилирует Android arm64 release библиотеку через cargo-ndk, затем собирает **debug-signed Media3 preview APK** через Gradle, включая JVM unit tests и lint;
 - сохраняет бинарники, отформатированные исходники и разрешённый Cargo.lock как Actions artifacts на странице запуска.
 
 Rust stable; Slint закреплён на 1.9.2. Cargo.lock создан в CI и сохранён в артефактах, но пока не добавлен в репозиторий. Скачать его в песочницу не удалось из-за недоступности внешнего хранилища Actions; последующие сборки без lockfile могут получить другие транзитивные версии. Следующий шаг — сохранить проверенный lockfile. Автоматическое форматирование CI не меняет исходники ветки.
@@ -69,8 +69,8 @@ cargo fmt --all
 cargo test -p lumen-core -p lumen-proxy -p lumen-youtube
 cargo clippy -p lumen-core -p lumen-proxy -p lumen-youtube --all-targets -- -D warnings
 cargo build -p lumen-desktop --release --target x86_64-pc-windows-msvc
-cargo ndk -t arm64-v8a -p 26 build -p lumen-android --release
-cargo apk build -p lumen-android --target aarch64-linux-android
+cargo ndk -t arm64-v8a -p 26 -o android/app/src/main/jniLibs build -p lumen-android --release
+(cd android && gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug :app:lintDebug)
 ```
 
 Android SDK/NDK/JDK настраиваются workflow. Preview APK подписывается отладочным ключом CI; для публикации нужен отдельный безопасно хранимый release key. Runtime на реальных Windows/Android ещё не проверен. EXE и APK успешно собраны; ссылки приведены выше. Загрузка в Drive не требуется и не настроена.
@@ -80,7 +80,7 @@ Android SDK/NDK/JDK настраиваются workflow. Preview APK подпи�
 1. CI зелёный: теперь зафиксировать проверенный Cargo.lock и проверить APK/EXE на устройствах.
 2. Расширить существующие тесты настоящего TLS на loopback: добавить смену сетевых условий и проверку ошибок сертификатов.
 3. Проверить metadata provider и Windows WebView2 playback на реальной сети; расширить resolver для современных YouTube-форматов.
-4. Добавить Android Media3 backend с маршрутизацией через Rust gateway; затем VpnService с явным системным согласием и обработкой lifecycle.
+4. Проверить Android Media3 на телефоне (seek, фон/возврат, Back, expired URL); затем VpnService с явным системным согласием и обработкой lifecycle.
 5. Реализовывать привилегированные платформенные методы только с отдельным capability detection и сетевыми испытаниями.
 
 ## Лицензирование
@@ -96,7 +96,7 @@ Android SDK/NDK/JDK настраиваются workflow. Preview APK подпи�
 
 ## Поиск видео (новый этап)
 
-После успешного самотестирования доступны поле запроса и список результатов: заголовок, канал, длительность, кнопка проверки медиапотока. Внешний браузер не запускается, автоматическое прямое соединение не выполняется. На Windows доступна кнопка Play через WebView2; на Android — только Check stream.
+После успешного самотестирования доступны поле запроса и список результатов: заголовок, канал, длительность, кнопка проверки медиапотока. Внешний браузер не запускается, автоматическое прямое соединение не выполняется. На Windows доступна кнопка Play через WebView2; на Android Gradle APK — Play через Media3.
 
 `lumen-youtube` выполняет HTTPS GET `/results?search_query=...` через созданный приложением CONNECT-прокси. Системные proxy settings игнорируются. Нет API-ключа, логина или передачи cookie. Redirect, consent и challenge страницы не обходятся — показывается ошибка. Если прокси недоступен, fallback на прямую сеть запрещён. Ввод ограничен 200 символами, ответ 4 MiB, запрос 25 секундами, выдача 30 уникальными video ID. Полученные названия показываются как обычный текст, не HTML.
 
@@ -115,7 +115,7 @@ UI использует один сетевой worker с ограниченно
 
 Для первых трёх подходящих форматов последовательно выполняется реальный GET с `Range: bytes=0-0`. Успех требует HTTP 206, корректного Content-Range, типа video/mp4 и ровно одного полученного байта. Redirect и прямой fallback запрещены. Signed media URLs не показываются в UI и убираются из сетевых ошибок; формат не реализует Debug, чтобы случайно не записать URL в лог. Общий таймаут подготовки в UI — 75 секунд. Проверка байта подтверждает доступность CDN на момент запроса, **не декодируемость или полное воспроизведение**.
 
-Сам resolver — диагностический/подготовительный слой. Windows WebView2 backend и передача медиаданных через Rust gateway добавлены следующим этапом; Android backend пока не реализован. На современном YouTube прямая progressive выдача может отсутствовать; полноценная поддержка JS signature/n transforms и DASH не реализована.
+Сам resolver — диагностический/подготовительный слой. Windows WebView2 backend и передача медиаданных через Rust gateway добавлены следующим этапом; Android Media3 backend добавлен следующим этапом. На современном YouTube прямая progressive выдача может отсутствовать; полноценная поддержка JS signature/n transforms и DASH не реализована.
 
 Дополнительно исправлена CDN-проба самотестирования: вместо корня `i.ytimg.com` проверяется конкретный thumbnail path. HTTP 404 по-прежнему считается ошибкой; это не ослабление проверки доступности.
 
@@ -132,7 +132,7 @@ UI использует один сетевой worker с ограниченно
 
 Закрытие player-окна отменяет сессию и закрывает listener/активные медиазапросы. Одновременно разрешено одно player-окно. Срок подписанного URL не обновляется автоматически: после его истечения новые Range-запросы завершатся ошибкой, потребуется повторно открыть видео. UI подтверждает создание окна, **не успешное декодирование**; ошибки самого `<video>` отображаются его нативными controls. Автозапуск может быть ограничен политикой WebView2 — используйте Play в окне плеера.
 
-Android и другие платформы пока сохраняют **Check stream**; Media3/ExoPlayer и VpnService всё ещё не реализованы. Windows playback не снимает ограничений resolver: cipher/n-transform/DASH/live/DRM не поддерживаются. Реальный запуск WebView2, seek и end-to-end YouTube нужно проверить на Windows-устройстве отдельно от компиляции CI.
+Android Gradle APK теперь использует **Play** через Media3; прочие/legacy пакеты сохраняют **Check stream**. VpnService пока не реализован. Windows playback не снимает ограничений resolver: cipher/n-transform/DASH/live/DRM не поддерживаются. Реальный запуск WebView2, seek и end-to-end YouTube нужно проверить на Windows-устройстве отдельно от компиляции CI.
 
 
 ### Подтверждение Windows playback build
@@ -150,3 +150,19 @@ Android и другие платформы пока сохраняют **Check s
 При уходе в фон ExoPlayer освобождается, позиция сохраняется; при возврате Activity player создаётся заново, пока сессия действительна. При закрытии Activity/ошибке playback JNI освобождает Rust-сессию и закрывает gateway. Неизвестный/stale session ID не может закрыть новую сессию. Если Android уничтожит весь процесс, старый URL не восстанавливается — видео нужно открыть снова. Background playback, PiP, audio focus customization, обновление expired URL и Android VpnService пока не реализованы.
 
 Основной Android CI теперь собирает Rust через `cargo-ndk -o android/app/src/main/jniLibs`, затем Gradle 8.11.1 / AGP 8.9.1 / JDK 17 выполняет JVM unit tests, assembleDebug и Android lint. APK по-прежнему debug-signed, arm64, API 26+. Локальные тяжёлые сборки не запускались. Legacy cargo-apk путь не включает Java/Media3 и остаётся только диагностическим вариантом. Реальное воспроизведение, переходы фон/возврат и lifecycle требуют проверки на телефоне.
+
+
+### Проверенная сборка Android Media3
+
+[CI 42192758983](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42192758983) — `success`: 24 Rust-теста, Clippy сетевых crates, Slint type-check, JNI cross-compile arm64, JVM-тест LoopbackPolicy, Android assembleDebug/lintDebug и Windows release build. JNI-код компилируется для Android, но его вызовы и lifecycle ещё не проверены на устройстве. Воспроизведение и доступность YouTube не подтверждены этим CI.
+
+#### Чек-лист на телефоне
+
+1. Распаковать APK из артефакта и установить на Android 8+ / arm64. Если старая preview-версия не обновляется из-за другой debug-подписи/версии, удалить её перед установкой (данные старой установки будут удалены).
+2. Дождаться самотестирования, выполнить поиск и нажать Play. При неподдерживаемом cipher/n/DASH должно появиться понятное сообщение, а не неработающий player.
+3. Для поддержанного MP4 проверить старт, звук, pause/resume, перемотку, смену ориентации.
+4. Уйти в фон и вернуться: воспроизведение в фоне должно остановиться, при возврате позиция восстановиться, если URL ещё действителен.
+5. Нажать Back, открыть другое видео и убедиться, что старая сессия не блокирует новый player.
+6. Отключить сеть во время playback: проверить сообщение об ошибке и возможность повторного открытия. После уничтожения процесса не ожидать восстановления старого loopback URL.
+
+Все перечисленные проверки устройства — **ещё не выполнены**. APK отладочно подписан, VpnService не запрашивается и системный трафик не перехватывается.
