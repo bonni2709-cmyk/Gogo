@@ -67,7 +67,8 @@ def main() -> int:
                 emit("cargo", tail)
         except FileNotFoundError:
             pass
-        print(f"::error title=cargo::cargo завершился с кодом {status}")
+        if status != 0:
+            print(f"::error title=cargo::cargo завершился с кодом {status}")
 
     sys.exit(status if status != 0 else 0)
 

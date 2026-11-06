@@ -100,7 +100,26 @@ jobs:
           exit "$status"
 
       - name: Package and sign APK (cargo-apk)
-        run: cargo apk build --release --lib
+        run: |
+          set +e
+          # cargo-apk ищет NDK по ANDROID_NDK_ROOT/ANDROID_NDK_PATH/ANDROID_NDK_HOME
+          # или в $ANDROID_HOME/ndk-bundle; на раннерах GitHub NDK лежит
+          # в $ANDROID_HOME/ndk/<версия> — экспортируем переменную сами.
+          if [ -z "${ANDROID_NDK_ROOT:-}" ]; then
+            export ANDROID_NDK_ROOT="$(ls -d "$ANDROID_HOME"/ndk/* 2>/dev/null | sort -V | tail -n 1)"
+          fi
+          if [ -z "${ANDROID_NDK_ROOT:-}" ] || [ ! -f "$ANDROID_NDK_ROOT/source.properties" ]; then
+            echo "::error title=cargo-apk::NDK не найден: $ANDROID_HOME/ndk/* (source.properties отсутствует)"
+            exit 1
+          fi
+          echo "ANDROID_NDK_ROOT=$ANDROID_NDK_ROOT"
+          cargo apk build --release --lib 2>&1 | tee apk-build.log
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "$status" -ne 0 ]; then
+            python3 .github/scripts/report_step_failure.py apk-build.log "cargo apk build"
+          fi
+          exit "$status"
 
       - name: Compile miniquad Java glue and inject dex
         run: |
@@ -134,10 +153,12 @@ jobs:
           cp android/java/QuadNative.java build/glue/QuadNative.java
 
           javac -classpath "$AJAR" -d build/glue/classes \
-              build/glue/MainActivity.java build/glue/QuadNative.java
+              build/glue/MainActivity.java build/glue/QuadNative.java 2>&1 | tee javac.log \
+              || { python3 .github/scripts/report_step_failure.py javac.log "javac glue"; exit 1; }
 
           "$BT_DIR/d8" --min-api 23 --lib "$AJAR" --output build/glue/dex \
-              $(find build/glue/classes -name '*.class' | sort)
+              $(find build/glue/classes -name '*.class' | sort) 2>&1 | tee d8.log \
+              || { python3 .github/scripts/report_step_failure.py d8.log "d8 dex"; exit 1; }
 
           test -f build/glue/dex/classes.dex
           echo "classes.dex готов: $(wc -c < build/glue/dex/classes.dex) байт"
@@ -145,15 +166,18 @@ jobs:
           # Внедряем dex в пакет, выравниваем и переподписываем release-ключом.
           cp "$APK" build/base.apk
           zip -q -j build/base.apk build/glue/dex/classes.dex
-          "$BT_DIR/zipalign" -f 4 build/base.apk build/aligned.apk
+          "$BT_DIR/zipalign" -f 4 build/base.apk build/aligned.apk 2>&1 | tee align.log \
+              || { python3 .github/scripts/report_step_failure.py align.log "zipalign"; exit 1; }
           mkdir -p dist
           "$BT_DIR/apksigner" sign \
             --ks release.keystore \
             --ks-pass pass:voxelknight \
             --key-pass pass:voxelknight \
             --out dist/VOXEL-KNIGHT.apk \
-            build/aligned.apk
-          "$BT_DIR/apksigner" verify --verbose dist/VOXEL-KNIGHT.apk
+            build/aligned.apk 2>&1 | tee sign.log \
+            || { python3 .github/scripts/report_step_failure.py sign.log "apksigner sign"; exit 1; }
+          "$BT_DIR/apksigner" verify --verbose dist/VOXEL-KNIGHT.apk 2>&1 | tee -a sign.log \
+            || { python3 .github/scripts/report_step_failure.py sign.log "apksigner verify"; exit 1; }
           ls -lh dist/VOXEL-KNIGHT.apk
 
       - name: Upload APK artifact
