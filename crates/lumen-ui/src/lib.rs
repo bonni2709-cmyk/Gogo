@@ -46,7 +46,7 @@ slint::slint! {
                 }
             }
             Text { text: root.selected-video; color: #a7bfd8; wrap: word-wrap; }
-            Text { text: root.playback-supported ? "Windows WebView2 player · progressive MP4 preview" : "Stream diagnostics · Android native playback pending"; color: #a7bfd8; wrap: word-wrap; }
+            Text { text: root.playback-supported ? "Native player · progressive MP4 preview" : "Stream diagnostics · native player unavailable"; color: #a7bfd8; wrap: word-wrap; }
         }
     }
 }
@@ -116,7 +116,7 @@ async fn worker(weak: slint::Weak<AppWindow>, mut commands: mpsc::Receiver<Comma
                         let _ = weak.upgrade_in_event_loop(move |ui| {
                             ui.set_searching(false);
                             match result {
-                                Ok(video) => ui.set_selected_video(format!("{} · {}\n{}", video.title, video.quality, if playing { "Player window opened. Use its native controls to play/pause/seek." } else { "MP4 CDN byte verified. Android player integration pending." }).into()),
+                                Ok(video) => ui.set_selected_video(format!("{} · {}\n{}", video.title, video.quality, if playing { "Player launch requested. Use its native controls to play/pause/seek." } else { "MP4 CDN byte verified. This package has no native player host." }).into()),
                                 Err(error) => ui.set_selected_video(format!("Video is not prepared: {error:#}").into()),
                             }
                         });

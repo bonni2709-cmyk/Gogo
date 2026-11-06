@@ -11,6 +11,9 @@ crate-type = ["cdylib"]
 lumen-ui = { path = "../lumen-ui" }
 slint = { workspace = true, features = ["backend-android-activity-06"] }
 android-activity = { version = "0.6", features = ["native-activity"] }
+lumen-youtube = { path = "../lumen-youtube" }
+jni = "0.21"
+anyhow.workspace = true
 
 [package.metadata.android]
 package = "app.lumentube.preview"
