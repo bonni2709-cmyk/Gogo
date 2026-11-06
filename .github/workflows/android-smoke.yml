@@ -44,6 +44,7 @@ jobs:
           echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
           cargo install cargo-ndk --version 3.5.4 --locked
       - name: Build Rust for emulator
+        id: rust
         run: cargo ndk -t x86_64 -p 26 -o android/app/src/main/jniLibs build -p lumen-android --release 2>&1 | tee rust.log
       - name: Generate synthetic offline video (test dependency only)
         run: |
@@ -54,6 +55,7 @@ jobs:
             -c:v libx264 -pix_fmt yuv420p -profile:v baseline -c:a aac -movflags +faststart \
             android/app/src/androidTest/assets/fixture.mp4
       - name: Compile instrumentation APKs
+        id: compile
         working-directory: android
         run: gradle --no-daemon -PlumenAbi=x86_64 :app:assembleDebug :app:assembleDebugAndroidTest 2>&1 | tee ../gradle-smoke.log
       - name: Enable KVM
@@ -74,9 +76,11 @@ jobs:
       - name: Expose failure diagnostics
         if: failure()
         run: |
-          for log in rust.log gradle-smoke.log instrumentation.log; do
+          for log in rust.log gradle-smoke.log; do
+            if [ "$log" = rust.log ] && [ "${{ steps.rust.outcome }}" != failure ]; then continue; fi
+            if [ "$log" = gradle-smoke.log ] && [ "${{ steps.compile.outcome }}" != failure ]; then continue; fi
             if [ ! -f "$log" ]; then continue; fi
-            text=$(tail -c 5000 "$log")
+            text=$(tail -c 2800 "$log")
             text="${text//'%'/'%25'}"
             text="${text//$'\n'/'%0A'}"
             text="${text//$'\r'/'%0D'}"
