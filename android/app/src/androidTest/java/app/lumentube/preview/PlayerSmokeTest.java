@@ -61,7 +61,9 @@ public class PlayerSmokeTest {
                 awaitReady(scenario);
                 assertTrue("fixture was never requested", server.requests.get() > 0);
             } // onDestroy calls nativeCloseSession; a missing JNI symbol fails the test.
-            host.onActivity(activity -> assertFalse(activity.isFinishing()));
+            // ActivityScenario.launch adds NEW_TASK | CLEAR_TASK. Launching the player
+            // therefore destroys the earlier host scenario; do not call onActivity on it.
+            assertEquals(Lifecycle.State.DESTROYED, host.getState());
         }
     }
 }
