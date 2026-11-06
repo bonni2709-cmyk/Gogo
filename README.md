@@ -4,14 +4,14 @@ Rust + Slint, Windows / Android. **Preview: сетевое ядро, поиск,
 
 ## Скачать проверенную CI-сборку
 
-Исходники бинарников: `d9f6836e85bf5fcd568d07a1c31fe1d0c63f06ff`.
-[Успешный workflow 42192758983](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42192758983):
+Исходники бинарников: `8cd1c3245bbf7dd3f69c4429d8002281850051e5`.
+[Успешный workflow 42197900196](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42197900196):
 
-- [Windows x64 — ZIP с lumen-desktop.exe](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42192758983/artifacts/13490572546) (~4.9 MB).
-- [Android arm64 — ZIP с preview APK](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42192758983/artifacts/13489819963) (~14.2 MB).
-- [Отформатированные исходники и Cargo.lock](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42192758983/artifacts/13490472472).
+- [Windows x64 — ZIP с lumen-desktop.exe](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42197900196/artifacts/13493391394) (~4.9 MB).
+- [Android arm64 — ZIP с preview APK](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42197900196/artifacts/13492219395) (~14.2 MB).
+- [Отформатированные исходники и Cargo.lock](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42197900196/artifacts/13492762943).
 
-Для скачивания Actions artifacts может потребоваться вход в GitHub; у артефактов ограниченный срок хранения. Это ссылки на CI-артефакты, не постоянные GitHub Releases. Android APK подписан отладочным ключом и требует Android 8+ / arm64. EXE не имеет подписи издателя. Успех сборки **не означает проверку запуска, поиска или обхода DPI на реальном устройстве**.
+Для скачивания Actions artifacts может потребоваться вход в GitHub; у артефактов ограниченный срок хранения. Это ссылки на CI-артефакты, не постоянные GitHub Releases. Android APK подписан отладочным ключом и требует Android 8+ / arm64. EXE не имеет подписи издателя. NativeActivity и Media3 проверены в x86_64/API 35 эмуляторе на локальном тестовом MP4. **Это не проверка физического устройства, YouTube, DPI или production Rust→CDN пути.**
 
 ## Workspace
 
@@ -165,7 +165,7 @@ Android Gradle APK теперь использует **Play** через Media3;
 5. Нажать Back, открыть другое видео и убедиться, что старая сессия не блокирует новый player.
 6. Отключить сеть во время playback: проверить сообщение об ошибке и возможность повторного открытия. После уничтожения процесса не ожидать восстановления старого loopback URL.
 
-Все перечисленные проверки устройства — **ещё не выполнены**. APK отладочно подписан, VpnService не запрашивается и системный трафик не перехватывается.
+На физическом телефоне этот чек-лист **ещё не выполнен**. Часть lifecycle/playback проверок успешно автоматизирована в эмуляторе, как описано ниже. APK отладочно подписан, VpnService не запрашивается и системный трафик не перехватывается.
 
 ## Android runtime smoke в эмуляторе
 
@@ -173,4 +173,15 @@ Android Gradle APK теперь использует **Play** через Media3;
 
 Instrumentation smoke запускает настоящую MainActivity (NativeActivity/Slint), затем PlayerActivity, ожидает Media3 READY/playing, выполняет seek и проверяет release/recreate при stop/resume. Закрытие Activity вызывает настоящий JNI close callback с неизвестным session ID. Отчёты instrumentation и logcat сохраняются отдельным Actions artifact.
 
-Границы теста: fixture отдаёт instrumentation-only Java loopback server, **не production Rust media gateway**. Этот сценарий не проверяет Rust→Java openPlayer вызов, signed CDN URLs, YouTube, DPI или реальные устройства. Он дополняет Rust unit tests шлюза и проверки сборки, а не заменяет end-to-end испытания. До завершения первого smoke workflow его успешность не заявляется.
+Границы теста: fixture отдаёт instrumentation-only Java loopback server, **не production Rust media gateway**. Этот сценарий не проверяет Rust→Java openPlayer вызов, signed CDN URLs, YouTube, DPI или реальные устройства. Он дополняет Rust unit tests шлюза и проверки сборки, а не заменяет end-to-end испытания. Успешный smoke workflow приведён ниже; на первом запуске была исправлена ошибка тестового harness с ActivityScenario CLEAR_TASK, а не ослаблены playback-проверки.
+
+
+### Подтверждённый Android runtime smoke
+
+- [Android runtime smoke 42197900164 — success](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42197900164).
+- [JUnit-отчёт и logcat](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42197900164/artifacts/13493447207).
+- [Основная сборка 42197900196 — success](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42197900196): Rust tests/Clippy, Slint, JVM unit test/lint, Windows EXE и Android arm64 APK.
+
+В эмуляторе API 35/x86_64 подтверждены: запуск NativeActivity, Media3 READY + isPlaying для синтетического H.264/AAC MP4, seek, release ExoPlayer при stop, recreate/playing при resume и JNI close callback с неизвестным ID при закрытии player. Сам тест не вызывает production Rust→Java `openPlayer` и не использует production Rust gateway.
+
+Первый прогон выявил ошибку тестового harness: `ActivityScenario.launch()` очищает предыдущий task (`NEW_TASK | CLEAR_TASK`), после чего обращение к прежней Activity через `onActivity` недопустимо. Тест теперь явно ожидает `DESTROYED` для прежнего host, сохраняя все проверки Media3. Это не доказательство поведения обычного перехода MainActivity→PlayerActivity в одном task; его ещё нужно проверить отдельно.
