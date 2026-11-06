@@ -31,6 +31,12 @@ package = "com.voxelknight.game"
 apk_name = "VoxelKnight"
 build_targets = ["aarch64-linux-android"]
 
+# Явные SDK-уровни: без этого cargo-apk 0.10 ставит target_sdk = 30,
+# а на раннере установлена только android-34+.
+[package.metadata.android.sdk]
+min_sdk_version = 23
+target_sdk_version = 34
+
 # Release-подпись. Keystore генерируется в CI перед сборкой
 # (шаг Generate release keystore), в репозиторий не коммитится.
 [package.metadata.android.signing.release]
