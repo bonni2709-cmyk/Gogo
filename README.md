@@ -4,12 +4,12 @@ Rust + Slint, Windows / Android. **Preview: сетевое ядро, поиск,
 
 ## Скачать проверенную CI-сборку
 
-Исходники бинарников: `8cd1c3245bbf7dd3f69c4429d8002281850051e5`.
-[Успешный workflow 42197900196](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42197900196):
+Исходники бинарников: `1941ea2bd3964d00f5d5df40df008942945fd950`.
+[Успешный workflow 42395024107](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42395024107):
 
-- [Windows x64 — ZIP с lumen-desktop.exe](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42197900196/artifacts/13493391394) (~4.9 MB).
-- [Android arm64 — ZIP с preview APK](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42197900196/artifacts/13492219395) (~14.2 MB).
-- [Отформатированные исходники и Cargo.lock](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42197900196/artifacts/13492762943).
+- [Windows x64 — ZIP с lumen-desktop.exe](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42395024107/artifacts/13583401796) (~4.9 MB).
+- [Android arm64 — ZIP с preview APK](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42395024107/artifacts/13583451855) (~14.2 MB).
+- [Отформатированные исходники и Cargo.lock](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42395024107/artifacts/13582582661).
 
 Для скачивания Actions artifacts может потребоваться вход в GitHub; у артефактов ограниченный срок хранения. Это ссылки на CI-артефакты, не постоянные GitHub Releases. Android APK подписан отладочным ключом и требует Android 8+ / arm64. EXE не имеет подписи издателя. NativeActivity и Media3 проверены в x86_64/API 35 эмуляторе на локальном тестовом MP4. **Это не проверка физического устройства, YouTube, DPI или production Rust→CDN пути.**
 
@@ -194,4 +194,13 @@ Instrumentation smoke запускает настоящую MainActivity (Native
 
 Исправление production gateway: Content-Range теперь сопоставляется с **исходным запросом**, а не проверяется только на внутреннюю согласованность. Шлюз отвергает другой диапазон, дублирующий Content-Range, partial headers на полном ответе и encoded body. Граничные диапазоны вычисляются без переполнения с учётом размера объекта. Если CDN вернул `bytes 0-9/100` на запрос `bytes=10-19`, плеер получит 502 без ошибочных медиабайтов.
 
-Граница покрытия: CONNECT-прокси в этом fixture — тестовая реализация, **не** crate `lumen-proxy`. Production CONNECT/SOCKS handlers и transport core имеют отдельные тесты. Доступность YouTube, фактический DPI и физические устройства этими тестами не подтверждаются. До выполнения обновлённого CI успешность новых тестов не заявляется.
+Граница покрытия: CONNECT-прокси в этом fixture — тестовая реализация, **не** crate `lumen-proxy`. Production CONNECT/SOCKS handlers и transport core имеют отдельные тесты. Доступность YouTube, фактический DPI и физические устройства этими тестами не подтверждаются. Новые тесты выполнены успешно в CI 42395024107; подробности приведены ниже.
+
+
+### Подтверждение CONNECT/TLS и строгой проверки Range
+
+- [Основной CI 42395024107 — success](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42395024107): **32 Rust-теста**, Clippy, Slint type-check, JVM unit test/lint и обе платформенные сборки.
+- [Android regression smoke 42395023983 — success](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42395023983): повторно подтверждены запуск NativeActivity, Media3 playback/seek и stop/resume на локальном MP4 в API 35/x86_64 эмуляторе.
+- [Отчёты и logcat](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42395023983/artifacts/13583540931).
+
+Новые TLS-тесты не ослабляют production certificate verification или DNS-политику: тестовый root certificate и локальное перенаправление CONNECT находятся исключительно в test fixture. Это проверка production gateway и reqwest-транспорта с test proxy, а не реального YouTube или полного production proxy/DPI пути. Поддержка cipher/n/DASH/live/DRM и испытания на физическом телефоне остаются отдельными задачами.
