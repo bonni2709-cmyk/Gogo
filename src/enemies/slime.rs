@@ -1,6 +1,7 @@
 //! Слизень: патруль с разворотом у обрывов, погоня и прыжок-выпад.
 
-use macroquad::shapes::draw_rectangle;
+use macroquad::color::Color;
+use macroquad::shapes::{draw_circle, draw_rectangle};
 
 use super::{palette, timing, *};
 use crate::physics::World;
@@ -118,11 +119,28 @@ pub(super) fn draw(t: &Transform, brain: &EnemyBrain, health: &Health, time: f32
     let dx = x + (w - dw) * 0.5;
     let dy = y + h - dh;
 
+    // Обводка силуэта.
+    draw_rectangle(dx - 1.0, dy - 1.0, dw + 2.0, dh + 2.0, palette::OUTLINE);
+
     // Тело и «спина» потемнее.
     draw_rectangle(dx, dy + dh * 0.35, dw, dh * 0.65, flash);
     draw_rectangle(dx + 2.0, dy, dw - 4.0, dh * 0.45, flash_color(palette::SLIME_DARK, health.hit_flash));
     // Брюхо — светлее.
     draw_rectangle(dx + 4.0, dy + dh * 0.62, dw - 8.0, dh * 0.24, flash_color(palette::SLIME_BELLY, health.hit_flash));
+
+    // Влажный блик и пузыри внутри.
+    draw_rectangle(dx + 3.0, dy + 2.0, dw * 0.34, 2.0, flash_color(palette::SLIME_GLOSS, health.hit_flash));
+    draw_rectangle(dx + 4.0, dy + 4.0, 2.0, 2.0, flash_color(palette::SLIME_GLOSS, health.hit_flash));
+    let bubble = (time * 2.2 + x * 0.13).sin() * 1.5;
+    draw_circle(
+        dx + dw * 0.62,
+        dy + dh * 0.55 + bubble,
+        2.4,
+        Color::new(0.5, 0.56, 0.34, 0.55),
+    );
+    // Тёмные пятна-вкрапления.
+    draw_rectangle(dx + dw * 0.55, dy + dh * 0.72, 4.0, 3.0, palette::SLIME_DARK);
+    draw_rectangle(dx + dw * 0.2, dy + dh * 0.8, 3.0, 2.0, palette::SLIME_DARK);
 
     // Глаза смотрит в сторону движения.
     let eye_y = dy + dh * 0.42;

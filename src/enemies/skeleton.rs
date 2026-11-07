@@ -1,6 +1,7 @@
 //! Скелет-мечник: патруль, погоня и выпад с длинной фазой телеграфа
 //! (Windup → Strike → Recover) — игрок успевает уйти или перехватить удар.
 
+use macroquad::color::Color;
 use macroquad::shapes::{draw_rectangle, draw_rectangle_lines};
 
 use super::{palette, timing, *};
@@ -134,10 +135,16 @@ pub(super) fn draw(t: &Transform, brain: &EnemyBrain, health: &Health, time: f32
     };
     draw_rectangle(fx(leg1, 5.0), y + h - 13.0, 5.0, 13.0, bone_dark);
     draw_rectangle(fx(leg2, 5.0), y + h - 13.0, 5.0, 13.0, bone_dark);
+    // Коленные суставы.
+    draw_rectangle(fx(leg1 + 1.0, 3.0), y + h - 9.0, 3.0, 3.0, palette::SOCKET);
+    draw_rectangle(fx(leg2 + 1.0, 3.0), y + h - 9.0, 3.0, 3.0, palette::SOCKET);
 
-    // Таз и торс.
+    // Таз и торс (с обводкой).
     draw_rectangle(fx(5.0, 16.0), y + h - 16.0, 16.0, 5.0, bone_dark);
+    draw_rectangle(fx(6.0, 14.0) - 1.0, y + 11.0, 16.0, 16.0, palette::OUTLINE);
     draw_rectangle(fx(6.0, 14.0), y + 12.0, 14.0, 14.0, bone);
+    // Позвоночник по центру.
+    draw_rectangle(fx(12.0, 2.0), y + 13.0, 2.0, 12.0, bone_dark);
     // Рёбра.
     for i in 0..3 {
         draw_rectangle(
@@ -148,9 +155,18 @@ pub(super) fn draw(t: &Transform, brain: &EnemyBrain, health: &Health, time: f32
             bone_dark,
         );
     }
+    // Рваные лохмотья поверх бёдер.
+    draw_rectangle(fx(6.0, 4.0), y + h - 13.0, 4.0, 7.0, palette::TATTER);
+    draw_rectangle(fx(11.0, 4.0), y + h - 13.0, 4.0, 9.0, palette::TATTER);
+    draw_rectangle(fx(16.0, 3.0), y + h - 13.0, 3.0, 6.0, palette::TATTER);
 
-    // Череп.
+    // Череп с обводкой.
+    draw_rectangle(fx(5.0, 16.0) - 1.0, y - 1.0, 18.0, 14.0, palette::OUTLINE);
     draw_rectangle(fx(5.0, 16.0), y, 16.0, 12.0, bone);
+    // Надбровье и трещина — характер «старого» скелета.
+    draw_rectangle(fx(5.0, 16.0), y + 3.0, 16.0, 1.0, bone_dark);
+    draw_rectangle(fx(8.0, 2.0), y + 1.0, 1.0, 3.0, palette::SOCKET);
+    draw_rectangle(fx(9.0, 2.0), y + 3.0, 2.0, 1.0, palette::SOCKET);
     // Глазницы и челюсть.
     let socket_y = y + 4.0;
     if facing_right {
@@ -161,6 +177,10 @@ pub(super) fn draw(t: &Transform, brain: &EnemyBrain, health: &Health, time: f32
         draw_rectangle(x + 8.0, socket_y, 3.0, 3.0, palette::SOCKET);
     }
     draw_rectangle(fx(7.0, 10.0), y + 9.0, 10.0, 2.0, bone_dark);
+    // Зубы в челюсти.
+    for ti in 0..3 {
+        draw_rectangle(fx(8.0 + ti as f32 * 3.0, 1.0), y + 9.0, 1.0, 2.0, palette::SOCKET);
+    }
     // Полоса ржавчины на черепе — следы старых боёв.
     draw_rectangle(fx(6.0, 6.0), y + 1.0, 6.0, 2.0, palette::RUST);
 
@@ -194,6 +214,9 @@ pub(super) fn draw(t: &Transform, brain: &EnemyBrain, health: &Health, time: f32
             blade_x - sword_len + 4.0
         };
         draw_rectangle(bx, sword_ly + 1.0, sword_len, 4.0, steel);
+        // Кромка и дол клинка.
+        draw_rectangle(bx, sword_ly + 1.0, sword_len, 1.0, Color::new(0.878, 0.855, 0.816, 1.0));
+        draw_rectangle(bx + 3.0, sword_ly + 3.0, (sword_len - 6.0).max(2.0), 1.0, palette::STEEL_DARK);
         draw_rectangle(
             bx + if facing_right { sword_len - 2.0 } else { 0.0 },
             sword_ly + 1.0,

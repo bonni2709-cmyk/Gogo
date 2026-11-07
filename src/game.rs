@@ -43,6 +43,32 @@ const HEART_FILL: Color = Color::new(0.549, 0.161, 0.129, 1.0);
 const HEART_SHINE: Color = Color::new(0.706, 0.294, 0.235, 1.0);
 const HEART_EMPTY: Color = Color::new(0.278, 0.227, 0.208, 1.0);
 
+// --- расширенная палитра детализации (землистая, тёмное фэнтези) ---
+/// Светлый скол камня (подсветка рёбер).
+const STONE_HI: Color = Color::new(0.420, 0.400, 0.369, 1.0);
+/// Глубокая тень камня (швы, изнанка).
+const STONE_LO: Color = Color::new(0.125, 0.114, 0.102, 1.0);
+/// Светлый мох.
+const MOSS_HI: Color = Color::new(0.373, 0.435, 0.267, 1.0);
+/// Тёмный мох (подлёток, тень).
+const MOSS_LO: Color = Color::new(0.165, 0.208, 0.118, 1.0);
+/// Тёмная земля под мхом.
+const DIRT_LO: Color = Color::new(0.145, 0.114, 0.090, 1.0);
+/// Глубокое пламя (внешний язык).
+const FLAME_DEEP: Color = Color::new(0.706, 0.353, 0.129, 1.0);
+/// Уголь/уголёк в воздухе.
+const EMBER: Color = Color::new(0.902, 0.549, 0.204, 1.0);
+/// Обводка силуэтов (почти чёрный тёплый).
+const OUTLINE: Color = Color::new(0.055, 0.047, 0.039, 1.0);
+/// Кожа ремня.
+const LEATHER: Color = Color::new(0.310, 0.220, 0.149, 1.0);
+/// Светлая сталь (края доспеха).
+const STEEL_HI: Color = Color::new(0.804, 0.773, 0.722, 1.0);
+/// Тёмная кожа/подкладка плаща.
+const CLOAK_DARK: Color = Color::new(0.302, 0.137, 0.118, 1.0);
+/// Туман на горизонте.
+const FOG: Color = Color::new(0.360, 0.333, 0.302, 1.0);
+
 /// Верхняя строка пола (мировые координаты) — линия горизонта для параллакса.
 const HORIZON: f32 = 14.0 * TILE;
 
@@ -188,9 +214,10 @@ impl Game {
         };
         set_camera(&camera);
 
-        draw_parallax(&self.cam_pos, &view);
+        draw_parallax(&self.cam_pos, &view, self.time);
         draw_tiles(&self.world, &self.cam_pos, &view);
         draw_torches(self.time);
+        draw_motes(&self.cam_pos, &view, self.time);
         draw_enemies(&self.enemies, self.time);
         draw_player(&self.player, self.time);
 
@@ -204,10 +231,19 @@ impl Game {
             self.fps_smooth += (fps - self.fps_smooth) * 0.08;
         }
 
+        // Панель статуса: тёмное поле с двойной рамкой (за текстом и сердцами).
+        draw_rectangle(6.0, 6.0, 320.0, 96.0, Color::new(0.02, 0.016, 0.014, 0.62));
+        draw_rectangle_lines(6.0, 6.0, 320.0, 96.0, 1.0, Color::new(0.30, 0.27, 0.24, 0.85));
+        draw_rectangle_lines(9.0, 9.0, 314.0, 90.0, 1.0, Color::new(0.16, 0.14, 0.12, 0.9));
+        // Угловые заклёпки рамки.
+        for (cx, cy) in [(10.0, 10.0), (318.0, 10.0), (10.0, 94.0), (318.0, 94.0)] {
+            draw_rectangle(cx, cy, 4.0, 4.0, GOLD);
+        }
+
         draw_text(
             &format!("FPS {:.0}", self.fps_smooth),
-            12.0,
-            26.0,
+            16.0,
+            24.0,
             20.0,
             TEXT_DIM,
         );
@@ -222,23 +258,15 @@ impl Game {
         };
         draw_text(
             &format!("STATE: {state}"),
-            12.0,
-            50.0,
+            16.0,
+            48.0,
             20.0,
             TEXT_DIM,
         );
 
-        // Здоровье: ряд «сердец»-квадратов (пиксельный стиль, ASCII-шрифт
-        // не содержит глифов сердец).
+        // Здоровье: пиксельные сердца (паттерн 5×5, шрифт без глифов ♥).
         for i in 0..self.player.max_hp {
-            let hx = 12.0 + i as f32 * 18.0;
-            let hy = 70.0;
-            if i < self.player.hp {
-                draw_rectangle(hx, hy, 14.0, 14.0, HEART_FILL);
-                draw_rectangle(hx + 2.0, hy + 2.0, 4.0, 4.0, HEART_SHINE);
-            } else {
-                draw_rectangle_lines(hx, hy, 14.0, 14.0, 1.0, HEART_EMPTY);
-            }
+            draw_heart(16.0 + i as f32 * 20.0, 68.0, i < self.player.hp);
         }
         // Шрифт по умолчанию в macroquad — только ASCII, поэтому HUD на латинице.
         draw_text(
@@ -330,79 +358,259 @@ fn hash_noise(i: i32) -> f32 {
     (v.fract() * 2.0) - 1.0
 }
 
-/// Три слоя параллакса: дальние руины, средние скалы, ближние контуры.
-fn draw_parallax(cam: &Vec2, view: &Vec2) {
-    struct Layer {
-        factor: f32,
-        color: Color,
-        span: f32,
-        min_h: f32,
-        max_h: f32,
-        seed: i32,
+/// Фон: градиент неба, луна, звёзды, четыре слоя силуэтов (руины,
+/// мёртвые деревья, скалы, ближний лес) и полосы тумана у горизонта.
+fn draw_parallax(cam: &Vec2, view: &Vec2, time: f32) {
+    let left = cam.x - view.x * 0.5;
+    let top = cam.y - view.y * 0.5;
+
+    // --- небо: вертикальный градиент тёмного (вверху) к тёплому у горизонта ---
+    let sky_bands = 8;
+    let sky_h = (HORIZON - top).max(view.y) / sky_bands as f32 + 1.0;
+    for i in 0..sky_bands {
+        let t = i as f32 / (sky_bands - 1) as f32;
+        let c = Color::new(
+            0.031 + t * 0.062,
+            0.027 + t * 0.043,
+            0.031 + t * 0.024,
+            1.0,
+        );
+        draw_rectangle(left, top + i as f32 * sky_h, view.x, sky_h, c);
     }
-    let layers = [
-        Layer {
-            factor: 0.2,
-            color: Color::new(0.118, 0.098, 0.082, 1.0),
-            span: 240.0,
-            min_h: 90.0,
-            max_h: 170.0,
-            seed: 11,
-        },
-        Layer {
-            factor: 0.45,
-            color: Color::new(0.145, 0.125, 0.106, 1.0),
-            span: 180.0,
-            min_h: 70.0,
-            max_h: 130.0,
-            seed: 47,
-        },
-        Layer {
-            factor: 0.7,
-            color: Color::new(0.176, 0.153, 0.133, 1.0),
-            span: 140.0,
-            min_h: 50.0,
-            max_h: 95.0,
-            seed: 83,
-        },
-    ];
 
-    for layer in &layers {
-        // Слой движется медленнее камеры: сдвигаем рисунок в мировых координатах.
-        let shift = cam.x * (1.0 - layer.factor);
-        let left = cam.x - view.x * 0.5;
-        let right = cam.x + view.x * 0.5;
-        let k_start = (((left + shift) / layer.span).floor() as i32) - 1;
-        let k_end = (((right + shift) / layer.span).ceil() as i32) + 1;
-
-        for k in k_start..=k_end {
-            let x = k as f32 * layer.span - shift;
-            let n = hash_noise(k + layer.seed * 1013);
-            let h = layer.min_h + (n + 1.0) * 0.5 * (layer.max_h - layer.min_h);
-            // Силуэт из двух ступеней — очертания руин/скал.
-            let w_top = layer.span * 0.30;
-            let w_base = layer.span * 0.62;
-            draw_rectangle(x, HORIZON - h, w_base, h, layer.color);
-            let h_top = h * 0.45;
+    // --- звёзды: редкие тёплые точки с мерцанием ---
+    let star_cell = 34.0;
+    let star_k0 = ((left * 0.94 / star_cell).floor()) as i32;
+    let star_k1 = (((left + view.x) * 0.94 / star_cell).ceil()) as i32;
+    let star_bottom = (HORIZON - 70.0).max(top + 20.0);
+    for k in star_k0..=star_k1 {
+        for row in 0..9 {
+            let n1 = hash_noise(k * 71 + row * 37 + 5);
+            let n2 = hash_noise(k * 131 + row * 17 + 9);
+            if n1 < 0.25 {
+                continue; // не в каждой ячейке есть звезда
+            }
+            let sx = left
+                + ((n1 + 1.0) * 0.5 * view.x + cam.x * 0.04).rem_euclid(view.x);
+            let sy = top + 14.0 + row as f32 * ((star_bottom - top - 20.0) / 9.0)
+                + (n2 + 1.0) * 6.0;
+            if sy > star_bottom {
+                continue;
+            }
+            let tw = 0.55 + 0.45 * (time * 1.7 + n2 * 9.0).sin();
             draw_rectangle(
-                x + (w_base - w_top) * 0.5,
-                HORIZON - h - h_top,
-                w_top,
-                h_top + 1.0,
-                layer.color,
+                sx,
+                sy,
+                1.5,
+                1.5,
+                Color::new(0.85, 0.82, 0.74, 0.20 + 0.35 * tw),
             );
         }
     }
+
+    // --- луна: тусклый диск с кратерами и тёплым ореолом ---
+    let moon_x = cam.x * 0.94 + 420.0;
+    let moon_y = top + 52.0;
+    draw_circle(moon_x, moon_y, 30.0, Color::new(0.85, 0.75, 0.55, 0.035));
+    draw_circle(moon_x, moon_y, 17.0, Color::new(0.85, 0.78, 0.60, 0.06));
+    draw_circle(moon_x, moon_y, 10.5, Color::new(0.78, 0.75, 0.66, 0.85));
+    draw_circle(moon_x - 3.0, moon_y - 2.0, 2.6, Color::new(0.62, 0.60, 0.54, 0.55));
+    draw_circle(moon_x + 3.5, moon_y + 3.0, 1.8, Color::new(0.64, 0.62, 0.56, 0.5));
+    draw_circle(moon_x + 1.5, moon_y - 4.5, 1.2, Color::new(0.63, 0.61, 0.55, 0.45));
+
+    // --- дальний слой: горный хребет с руинами замка ---
+    {
+        let speed = 0.12; // доля движения камеры: дальше — медленнее
+        let color = Color::new(0.098, 0.082, 0.071, 1.0);
+        let span = 260.0;
+        let shift = cam.x * (1.0 - speed);
+        let k_start = (((left - shift) / span).floor()) as i32 - 1;
+        let k_end = (((left + view.x - shift) / span).ceil()) as i32 + 1;
+        for k in k_start..=k_end {
+            let x = k as f32 * span + shift;
+            // Хребет: ступенчатые колонны.
+            let col_w = 16.0;
+            let cols = (span / col_w) as i32 + 1;
+            for c in 0..cols {
+                let n = hash_noise(k * 977 + c * 53 + 3);
+                let h = 60.0 + (n + 1.0) * 0.5 * 90.0;
+                // Плавный силуэт: средняя колонна выше.
+                let center_bias = 1.0 - ((c as f32 / cols as f32) - 0.5).abs();
+                let h = h * (0.75 + center_bias * 0.45);
+                draw_rectangle(x + c as f32 * col_w, HORIZON - h, col_w + 1.0, h, color);
+            }
+            // Руина замка на некоторых сегментах.
+            let m = hash_noise(k * 613 + 11);
+            if m > 0.35 {
+                let tower_x = x + span * 0.3 + m * 40.0;
+                let tower_h = 120.0 + (m + 1.0) * 35.0;
+                draw_rectangle(tower_x, HORIZON - tower_h, 30.0, tower_h, color);
+                // Зубцы.
+                for ci in 0..3 {
+                    draw_rectangle(
+                        tower_x + ci as f32 * 11.0,
+                        HORIZON - tower_h - 7.0,
+                        7.0,
+                        7.0,
+                        color,
+                    );
+                }
+                // Пролом стены.
+                draw_rectangle(tower_x + 34.0, HORIZON - tower_h * 0.55, 44.0, tower_h * 0.55, color);
+                draw_rectangle(
+                    tower_x + 74.0,
+                    HORIZON - tower_h * 0.40,
+                    24.0,
+                    tower_h * 0.40,
+                    color,
+                );
+                // Тусклые окна-бойницы.
+                draw_rectangle(
+                    tower_x + 12.0,
+                    HORIZON - tower_h + 24.0,
+                    5.0,
+                    11.0,
+                    Color::new(0.72, 0.48, 0.20, 0.5),
+                );
+                if m > 0.6 {
+                    draw_rectangle(
+                        tower_x + 12.0,
+                        HORIZON - tower_h + 52.0,
+                        5.0,
+                        11.0,
+                        Color::new(0.66, 0.42, 0.18, 0.4),
+                    );
+                }
+            }
+        }
+    }
+
+    // --- второй слой: холмы и мёртвые деревья ---
+    {
+        let speed = 0.3;
+        let color = Color::new(0.129, 0.106, 0.090, 1.0);
+        let tree_color = Color::new(0.106, 0.086, 0.071, 1.0);
+        let span = 190.0;
+        let shift = cam.x * (1.0 - speed);
+        let k_start = (((left - shift) / span).floor()) as i32 - 1;
+        let k_end = (((left + view.x - shift) / span).ceil()) as i32 + 1;
+        for k in k_start..=k_end {
+            let x = k as f32 * span + shift;
+            let n = hash_noise(k * 449 + 29);
+            let h = 46.0 + (n + 1.0) * 0.5 * 55.0;
+            draw_rectangle(x, HORIZON - h, span * 0.72, h, color);
+            draw_rectangle(x + span * 0.5, HORIZON - h - 14.0, span * 0.4, 16.0, color);
+
+            // Мёртвое дерево-скелет.
+            let t = hash_noise(k * 271 + 7);
+            if t > 0.2 {
+                let tx = x + span * 0.15 + (t + 1.0) * 30.0;
+                let th = 44.0 + (t + 1.0) * 16.0;
+                draw_rectangle(tx, HORIZON - th, 4.0, th, tree_color);
+                draw_rectangle(tx - 10.0, HORIZON - th + 6.0, 11.0, 4.0, tree_color);
+                draw_rectangle(tx - 13.0, HORIZON - th + 1.0, 4.0, 7.0, tree_color);
+                draw_rectangle(tx + 3.0, HORIZON - th + 13.0, 10.0, 4.0, tree_color);
+                draw_rectangle(tx + 11.0, HORIZON - th + 8.0, 4.0, 7.0, tree_color);
+            }
+        }
+    }
+
+    // --- третий слой: скальные шпили и стены руин ---
+    {
+        let speed = 0.55;
+        let color = Color::new(0.153, 0.130, 0.110, 1.0);
+        let span = 150.0;
+        let shift = cam.x * (1.0 - speed);
+        let k_start = (((left - shift) / span).floor()) as i32 - 1;
+        let k_end = (((left + view.x - shift) / span).ceil()) as i32 + 1;
+        for k in k_start..=k_end {
+            let x = k as f32 * span + shift;
+            let n = hash_noise(k * 811 + 41);
+            if n > -0.15 {
+                // Шпиль: ступенчатый треугольник.
+                let sh = 70.0 + (n + 1.0) * 0.5 * 60.0;
+                let steps = 5;
+                for s in 0..steps {
+                    let sw = 46.0 * (1.0 - s as f32 / steps as f32) + 8.0;
+                    draw_rectangle(
+                        x + (46.0 - sw) * 0.5,
+                        HORIZON - sh + s as f32 * (sh / steps as f32),
+                        sw,
+                        sh / steps as f32 + 1.0,
+                        color,
+                    );
+                }
+            } else {
+                // Обломок стены с бойницей.
+                let wh = 52.0 + (n + 1.0) * 30.0;
+                draw_rectangle(x + 20.0, HORIZON - wh, 64.0, wh, color);
+                draw_rectangle(x + 34.0, HORIZON - wh + 14.0, 7.0, 16.0, Color::new(0.05, 0.04, 0.035, 1.0));
+                draw_rectangle(x + 58.0, HORIZON - wh + 14.0, 7.0, 16.0, Color::new(0.05, 0.04, 0.035, 1.0));
+                draw_rectangle(x + 20.0, HORIZON - wh - 6.0, 14.0, 6.0, color);
+                draw_rectangle(x + 66.0, HORIZON - wh - 6.0, 14.0, 6.0, color);
+            }
+        }
+    }
+
+    // --- ближний слой: тёмный кряж у самого горизонта ---
+    {
+        let speed = 0.8;
+        let color = Color::new(0.184, 0.157, 0.133, 1.0);
+        let span = 120.0;
+        let shift = cam.x * (1.0 - speed);
+        let k_start = (((left - shift) / span).floor()) as i32 - 1;
+        let k_end = (((left + view.x - shift) / span).ceil()) as i32 + 1;
+        for k in k_start..=k_end {
+            let x = k as f32 * span + shift;
+            let n = hash_noise(k * 197 + 61);
+            let h = 26.0 + (n + 1.0) * 0.5 * 34.0;
+            draw_rectangle(x, HORIZON - h, span + 1.0, h, color);
+            // Верхушки елей.
+            let m = hash_noise(k * 353 + 13);
+            if m > 0.0 {
+                let px = x + (m + 1.0) * 0.5 * span * 0.7;
+                let ph = h + 26.0 + (m + 1.0) * 10.0;
+                for s in 0..4 {
+                    let sw = 26.0 - s as f32 * 6.0;
+                    draw_rectangle(
+                        px - sw * 0.5 + 6.0,
+                        HORIZON - ph + s as f32 * 7.0,
+                        sw,
+                        8.0,
+                        color,
+                    );
+                }
+            }
+        }
+    }
+
+    // --- туман у горизонта: мягкие полосы с лёгким дрейфом ---
+    for i in 0..4 {
+        let drift = (time * (6.0 + i as f32 * 3.0)).sin() * 18.0;
+        draw_rectangle(
+            left - 20.0 + drift,
+            HORIZON - 14.0 + i as f32 * 5.0,
+            view.x + 40.0,
+            5.0,
+            Color::new(FOG.r, FOG.g, FOG.b, 0.045 + i as f32 * 0.02),
+        );
+    }
 }
 
-/// Тайловая отрисовка: камень с вариацией оттенков, мох на открытых верхах,
-/// тёмные швы между тайлами.
+/// Тайловая отрисовка: каменная кладка (ряды со швами и забутовкой),
+/// сколы и трещины, мох на открытых верхах, боковая подсветка рёбер.
 fn draw_tiles(world: &World, cam: &Vec2, view: &Vec2) {
     let visible = Aabb::new(
         cam.x - view.x * 0.5 - TILE,
         cam.y - view.y * 0.5 - TILE,
         view.x + TILE * 2.0,
         view.y + TILE * 2.0,
+    );
+    let view_rect = Aabb::new(
+        cam.x - view.x * 0.5,
+        cam.y - view.y * 0.5,
+        view.x,
+        view.y,
     );
 
     for solid in world.query(visible) {
@@ -416,20 +624,182 @@ fn draw_tiles(world: &World, cam: &Vec2, view: &Vec2) {
                 let x = tx as f32 * TILE;
                 let y = ty as f32 * TILE;
 
-                let shade = ((hash_noise(tx * 73 + ty * 131) + 1.0) * 0.5 * 3.0) as usize;
-                draw_rectangle(x, y, TILE, TILE, STONE[shade.min(2)]);
-
-                // Верхний край открыт для воздуха — мох и трава.
-                let above = Aabb::new(x, y - 1.0, TILE, 1.0);
-                if !world.overlaps_any(above) {
-                    draw_rectangle(x, y, TILE, 7.0, MOSS);
-                    draw_rectangle(x, y + 7.0, TILE, 4.0, DIRT);
+                // Отсечение невидимых тайлов — экономия отрисовки.
+                if !view_rect.overlaps(&Aabb::new(x, y, TILE, TILE)) {
+                    continue;
                 }
 
-                // Тёмный шов по периметру тайла — чёткая пиксельная сетка.
+                let seed = tx * 73 + ty * 131;
+                let shade = ((hash_noise(seed) + 1.0) * 0.5 * 3.0) as usize;
+                let base = STONE[shade.min(2)];
+                draw_rectangle(x, y, TILE, TILE, base);
+
+                // --- кладка: три ряда кирпичей со смещёнными стыками ---
+                let rows = [11.0, 10.0, 11.0];
+                let mut ry = y;
+                for (ri, rh) in rows.iter().enumerate() {
+                    if ri > 0 {
+                        // Горизонтальный шов + тень под ним.
+                        draw_rectangle(x, ry - 1.0, TILE, 1.0, STONE_DARK);
+                        draw_rectangle(x, ry, TILE, 1.0, STONE_LO);
+                    }
+                    // Вертикальные стыки (кладка вразбежку): второй
+                    // элемент — NaN-заглушка, когда стык один.
+                    let off =
+                        ((hash_noise(seed + ri as i32 * 17) + 1.0) * 0.5 * 6.0) - 3.0;
+                    let joint: [f32; 2] = match ri {
+                        0 => [16.0 + off, f32::NAN],
+                        1 => [8.0, 24.0],
+                        _ => [16.0 - off, f32::NAN],
+                    };
+                    for jx in joint {
+                        if jx.is_nan() {
+                            continue;
+                        }
+                        draw_rectangle(x + jx, ry + 1.0, 1.0, *rh - 2.0, STONE_DARK);
+                        // Подсветка края стыка (свет из факелов/сверху).
+                        draw_rectangle(x + jx + 1.0, ry + 1.0, 1.0, *rh - 2.0, STONE_HI);
+                    }
+                    // Лёгкая верхняя грань ряда.
+                    draw_rectangle(x + 1.0, ry + 1.0, TILE - 2.0, 1.0, STONE_HI);
+                    ry += *rh;
+                }
+
+                // --- края: боковые грани и тени ---
+                let open_above = !world.overlaps_any(Aabb::new(x, y - 1.0, TILE, 1.0));
+                let open_left = !world.overlaps_any(Aabb::new(x - 1.0, y, 1.0, TILE));
+                let open_right = !world.overlaps_any(Aabb::new(x + TILE, y, 1.0, TILE));
+                let open_below = !world.overlaps_any(Aabb::new(x, y + TILE, TILE, 1.0));
+
+                if open_left {
+                    draw_rectangle(x, y, 3.0, TILE, STONE_LO);
+                    draw_rectangle(x + 3.0, y, 1.0, TILE, STONE_HI);
+                }
+                if open_right {
+                    draw_rectangle(x + TILE - 3.0, y, 3.0, TILE, STONE_LO);
+                }
+                if open_below {
+                    draw_rectangle(x, y + TILE - 4.0, TILE, 4.0, STONE_LO);
+                    draw_rectangle(x, y + TILE - 1.0, TILE, 1.0, OUTLINE);
+                }
+
+                // --- открытый верх: мох, трава, земля ---
+                if open_above {
+                    let moss_h = 5.0 + ((hash_noise(seed + 5) + 1.0) * 0.5) * 5.0;
+                    draw_rectangle(x, y, TILE, moss_h, MOSS);
+                    draw_rectangle(x, y, TILE, 2.0, MOSS_HI);
+                    // Кусочки мха свисают вниз по краям.
+                    for i in 0..3 {
+                        let dx = ((hash_noise(seed + 40 + i) + 1.0) * 0.5) * (TILE - 4.0);
+                        let dh = 2.0 + ((hash_noise(seed + 50 + i) + 1.0) * 0.5) * 4.0;
+                        draw_rectangle(x + dx, y + moss_h - 1.0, 3.0, dh, MOSS_LO);
+                    }
+                    draw_rectangle(x, y + moss_h, TILE, 3.0, DIRT);
+                    draw_rectangle(x, y + moss_h + 3.0, TILE, 1.0, DIRT_LO);
+                    // Камешки у основания мха.
+                    let n = ((hash_noise(seed + 9) + 1.0) * 1.5) as i32;
+                    for i in 0..n {
+                        let px = 3.0 + ((hash_noise(seed + 60 + i) + 1.0) * 0.5) * (TILE - 8.0);
+                        draw_rectangle(x + px, y + moss_h + 4.0, 2.0, 2.0, STONE_HI);
+                    }
+                }
+
+                // --- трещины и сколы ---
+                let cracks = ((hash_noise(seed + 3) + 1.0) * 1.2) as i32;
+                for c in 0..cracks {
+                    let mut px = x + 5.0
+                        + ((hash_noise(seed + 13 + c * 7) + 1.0) * 0.5) * (TILE - 12.0);
+                    let mut py = y + 6.0
+                        + ((hash_noise(seed + 23 + c * 7) + 1.0) * 0.5) * (TILE - 14.0);
+                    for s in 0..4 {
+                        draw_rectangle(px, py, 1.5, 1.5, STONE_LO);
+                        px += ((hash_noise(seed + 31 + c * 11 + s * 5) + 1.0) * 0.5) * 4.0 - 1.5;
+                        py += 2.0 + ((hash_noise(seed + 37 + c * 13 + s * 3) + 1.0) * 0.5) * 2.0;
+                    }
+                }
+                // Скол-пятно в углу.
+                if hash_noise(seed + 19) > 0.55 {
+                    let corner = ((hash_noise(seed + 21) + 1.0) * 0.5) as i32;
+                    let cx = if corner % 2 == 0 { x + 2.0 } else { x + TILE - 8.0 };
+                    let cy = if corner > 1 { y + 2.0 } else { y + TILE - 8.0 };
+                    draw_rectangle(cx, cy, 6.0, 6.0, STONE_LO);
+                    draw_rectangle(cx + 1.0, cy + 1.0, 3.0, 3.0, STONE[0]);
+                }
+
+                // Чёткий шов по периметру — пиксельная сетка.
                 draw_rectangle_lines(x, y, TILE, TILE, 1.0, STONE_DARK);
             }
         }
+    }
+}
+
+/// Пиксельное сердце (паттерн 5×5 при масштабе 3): обводка, заливка,
+/// блик. Пустое сердце — тёмная «пустая» версия того же узора.
+fn draw_heart(x: f32, y: f32, filled: bool) {
+    const S: f32 = 3.0;
+    // 1 — заполненная ячейка узора.
+    const PATTERN: [[u8; 5]; 5] = [
+        [0, 1, 0, 1, 0],
+        [1, 1, 1, 1, 1],
+        [1, 1, 1, 1, 1],
+        [0, 1, 1, 1, 0],
+        [0, 0, 1, 0, 0],
+    ];
+
+    // Сначала обводка (расширяем узор на 1 единицу).
+    for r in 0..5usize {
+        for c in 0..5usize {
+            if PATTERN[r][c] == 1 {
+                draw_rectangle(
+                    x + c as f32 * S - 1.0,
+                    y + r as f32 * S - 1.0,
+                    S + 2.0,
+                    S + 2.0,
+                    OUTLINE,
+                );
+            }
+        }
+    }
+    // Заливка.
+    let fill = if filled { HEART_FILL } else { HEART_EMPTY };
+    for r in 0..5usize {
+        for c in 0..5usize {
+            if PATTERN[r][c] == 1 {
+                draw_rectangle(x + c as f32 * S, y + r as f32 * S, S, S, fill);
+            }
+        }
+    }
+    if filled {
+        // Блик на левой дольке + тень снизу.
+        draw_rectangle(x + S + 1.0, y + S + 1.0, S - 1.0, S - 1.0, HEART_SHINE);
+        draw_rectangle(x + 2.0 * S, y + 4.0 * S, S, 1.0, Color::new(0.35, 0.09, 0.08, 1.0));
+    } else {
+        // Пустое: тёмный контур внутри.
+        draw_rectangle(x + S + 1.0, y + S + 1.0, S - 1.0, S - 1.0, Color::new(0.16, 0.13, 0.12, 1.0));
+    }
+}
+
+/// Пылинки и угольки в воздухе: тёплые искры и пыль, медленно дрейфуют.
+fn draw_motes(cam: &Vec2, view: &Vec2, time: f32) {
+    for i in 0..26 {
+        let h1 = hash_noise(i * 37 + 5);
+        let h2 = hash_noise(i * 91 + 13);
+        let speed = 5.0 + (h1 + 1.0) * 4.0;
+        let span_x = view.x + 60.0;
+        let span_y = view.y + 60.0;
+        let px = cam.x - view.x * 0.5 - 30.0
+            + (((h1 + 1.0) * 0.5 * span_x + time * speed * 0.35) % span_x);
+        let py = cam.y - view.y * 0.5 - 30.0
+            + (((h2 + 1.0) * 0.5 * span_y - time * speed).rem_euclid(span_y));
+        let tw = 0.5 + 0.5 * (time * 2.6 + i as f32 * 1.7).sin();
+        let warm = i % 3 == 0;
+        let c = if warm {
+            Color::new(EMBER.r, EMBER.g, EMBER.b, 0.12 + 0.22 * tw)
+        } else {
+            Color::new(0.62, 0.58, 0.50, 0.08 + 0.14 * tw)
+        };
+        let size = if warm { 2.0 } else { 1.5 };
+        draw_rectangle(px, py, size, size, c);
     }
 }
 
@@ -447,24 +817,78 @@ fn draw_torches(time: f32) {
 
     for (i, (x, y)) in TORCHES.into_iter().enumerate() {
         let flicker = hash_noise(i as i32 * 17 + (time * 8.0) as i32);
-        let pulse = 1.0 + flicker * 0.12;
+        let flick2 = hash_noise(i as i32 * 31 + (time * 13.0 + 4.0) as i32);
+        let pulse = 1.0 + flicker * 0.14;
+        let lean = flick2 * 2.0; // язык пламя косит в сторону
 
-        // Мягкое свечение — два концентрических круга с низкой альфой.
-        draw_circle(x + 3.0, y, 46.0 * pulse, Color::new(0.851, 0.643, 0.255, 0.055));
-        draw_circle(x + 3.0, y, 26.0 * pulse, Color::new(0.851, 0.643, 0.255, 0.085));
+        // --- мягкий тёплый свет: три кольца + пятно на полу ---
+        draw_circle(x + 3.0, y - 6.0, 64.0 * pulse, Color::new(0.851, 0.643, 0.255, 0.030));
+        draw_circle(x + 3.0, y - 6.0, 40.0 * pulse, Color::new(0.851, 0.643, 0.255, 0.055));
+        draw_circle(x + 3.0, y - 4.0, 22.0 * pulse, Color::new(0.906, 0.706, 0.318, 0.095));
+        // Световое пятно (горизонтальные слои — условный эллипс).
+        let pool_w = 46.0 * pulse;
+        draw_rectangle(
+            x - pool_w * 0.5 + 3.0,
+            y + 14.0,
+            pool_w,
+            5.0,
+            Color::new(0.851, 0.643, 0.255, 0.05),
+        );
+        draw_rectangle(
+            x - pool_w * 0.32 + 3.0,
+            y + 14.0,
+            pool_w * 0.64,
+            3.0,
+            Color::new(0.906, 0.706, 0.318, 0.07),
+        );
 
-        // Держатель.
-        draw_rectangle(x, y - 2.0, 6.0, 16.0, IRON);
-        draw_rectangle(x - 2.0, y + 12.0, 10.0, 4.0, IRON);
+        // --- кованый держатель: пластина, заклёпки, кронштейн, корзинка ---
+        draw_rectangle(x - 1.0, y + 1.0, 8.0, 17.0, IRON);
+        draw_rectangle(x - 1.0, y + 1.0, 8.0, 2.0, STEEL_DARK); // верх пластины
+        draw_rectangle(x - 1.0, y + 16.0, 8.0, 2.0, OUTLINE); // низ пластины
+        draw_rectangle(x + 0.0, y + 4.0, 2.0, 2.0, STEEL_HI); // заклёпка 1
+        draw_rectangle(x + 5.0, y + 4.0, 2.0, 2.0, STEEL_HI); // заклёпка 2
+        draw_rectangle(x + 5.0, y + 12.0, 2.0, 2.0, STEEL_HI); // заклёпка 3
+        // Рукоять вверх и чаша.
+        draw_rectangle(x + 1.0, y - 4.0, 4.0, 6.0, IRON);
+        draw_rectangle(x - 2.0, y - 5.0, 10.0, 3.0, IRON);
+        draw_rectangle(x - 2.0, y - 5.0, 10.0, 1.0, STEEL_DARK);
+        // Рёбра корзинки.
+        draw_rectangle(x - 3.0, y - 10.0, 2.0, 7.0, IRON);
+        draw_rectangle(x + 7.0, y - 10.0, 2.0, 7.0, IRON);
+        draw_rectangle(x - 3.0, y - 11.0, 12.0, 2.0, IRON);
 
-        // Пламя.
-        let flame_h = 12.0 * pulse;
-        draw_rectangle(x + 1.0, y - flame_h, 4.0, flame_h, FLAME);
-        draw_circle(x + 3.0, y - flame_h + 2.0, 3.0, FLAME_CORE);
+        // --- многослойное пламя ---
+        let fh = 17.0 * pulse;
+        // Внешний тёмно-оранжевый язык (ступенчатый, с наклоном).
+        draw_rectangle(x + 0.5 + lean * 0.4, y - fh * 0.72, 7.0, fh * 0.72, FLAME_DEEP);
+        draw_rectangle(x + 1.5 + lean * 0.7, y - fh, 5.0, fh * 0.34, FLAME_DEEP);
+        draw_rectangle(x + 2.5 + lean, y - fh - 3.0, 3.0, 4.0, FLAME_DEEP);
+        // Средний оранжевый.
+        draw_rectangle(x + 1.5 + lean * 0.5, y - fh * 0.60, 5.0, fh * 0.60, FLAME);
+        draw_rectangle(x + 2.2 + lean * 0.8, y - fh * 0.86, 3.0, fh * 0.30, FLAME);
+        // Ядро.
+        draw_rectangle(x + 2.5 + lean * 0.3, y - fh * 0.34, 3.0, fh * 0.34, FLAME_CORE);
+        draw_circle(x + 4.0, y - 2.0, 3.2, Color::new(0.98, 0.90, 0.65, 0.9));
+
+        // --- угольки, поднимающиеся от пламени ---
+        for e in 0..3 {
+            let phase = (time * (1.3 + e as f32 * 0.4) + i as f32 * 0.7 + e as f32 * 2.1)
+                .rem_euclid(1.0);
+            let ex = x + 3.0 + ((time * (18.0 + e as f32 * 7.0) + i as f32 * 40.0)
+                .sin()
+                * (4.0 + e as f32 * 3.0))
+                + lean;
+            let ey = y - 6.0 - phase * 42.0;
+            let ea = (1.0 - phase) * 0.75;
+            let es = if phase < 0.4 { 2.0 } else { 1.5 };
+            draw_rectangle(ex, ey, es, es, Color::new(EMBER.r, EMBER.g, EMBER.b, ea));
+        }
     }
 }
 
-/// Рыцарь из прямоугольников: поза зависит от состояния, взгляд — от `facing`.
+/// Рыцарь: послойная пиксельная отрисовка — обводка силуэта, бевели
+/// (свет сверху-слева), детали доспеха, плащ со складками, шлем с плюмажем.
 fn draw_player(p: &Player, time: f32) {
     // Мигание при i-frames после получения урона.
     if p.is_hurt_flashing() && ((time * 20.0) as i32) % 2 == 0 {
@@ -486,27 +910,7 @@ fn draw_player(p: &Player, time: f32) {
         }
     };
 
-    // Тень на земле.
-    if p.on_ground {
-        draw_rectangle(x + 2.0, y + h - 1.0, w - 4.0, 3.0, Color::new(0.0, 0.0, 0.0, 0.35));
-    }
-
-    // Шлейф рывка.
-    if p.state == PlayerState::Dash {
-        let dir = p.facing;
-        for i in 0..3 {
-            let alpha = 110.0 - i as f32 * 35.0;
-            let gx = x - dir * (8.0 + i as f32 * 9.0);
-            draw_rectangle(
-                gx + 4.0,
-                y + 12.0,
-                w - 8.0,
-                h - 22.0,
-                Color::new(0.659, 0.627, 0.592, alpha / 255.0),
-            );
-        }
-    }
-
+    // --- поза ---
     let mut bob = 0.0f32;
     let mut lean = 0.0f32;
     let mut crouch = 0.0f32;
@@ -527,12 +931,10 @@ fn draw_player(p: &Player, time: f32) {
             leg_phase = -0.4;
         }
         PlayerState::WallSlide => {
-            // Прижатие к стене: корпус чуть ниже, ноги подобраны.
             crouch = 3.0;
             leg_phase = 0.7;
         }
         PlayerState::Hurt => {
-            // Отброс: тело напряжено, ноги в напряжённой стойке.
             crouch = 2.0;
             leg_phase = 0.6;
         }
@@ -542,28 +944,61 @@ fn draw_player(p: &Player, time: f32) {
             leg_phase = 1.0;
         }
     }
-
     let top = y + bob + crouch;
 
-    // --- плащ (за корпусом) ---
-    let sway = (time * 6.0).sin() * 1.5 - p.vel.x * 0.012;
-    let cloak_w = 9.0;
-    let cloak_lx = if facing_right { 2.0 + sway } else { w - 11.0 - sway };
-    draw_rectangle(
-        fx(cloak_lx, cloak_w),
-        top + 13.0,
-        cloak_w,
-        18.0 - crouch * 0.5,
-        CLOAK,
-    );
+    // --- тень на земле (слоями — мягкий край) ---
+    if p.on_ground {
+        draw_rectangle(x + 1.0, y + h - 1.0, w - 2.0, 4.0, Color::new(0.0, 0.0, 0.0, 0.30));
+        draw_rectangle(x + 4.0, y + h - 1.0, w - 8.0, 3.0, Color::new(0.0, 0.0, 0.0, 0.22));
+    }
 
-    // --- ноги ---
-    let leg_y = top + h - 12.0;
+    // --- шлейф рывка: силуэты-призраки позади ---
+    if p.state == PlayerState::Dash {
+        let dir = p.facing;
+        for i in 0..3 {
+            let a = 0.40 - i as f32 * 0.11;
+            let gx = x - dir * (7.0 + i as f32 * 8.0);
+            let ghost = Color::new(0.66, 0.63, 0.59, a);
+            draw_rectangle(gx + 5.0, top + 10.0, w - 10.0, 17.0, ghost);
+            draw_rectangle(gx + 6.0, top + 1.0, 12.0, 10.0, ghost);
+            draw_rectangle(gx + 7.0, top + 25.0, 4.0, 14.0, ghost);
+        }
+    }
+
+    // --- примитивы: обводка + заливка, бевель свет/тень ---
+    let part = |lx: f32, ly: f32, pw: f32, ph: f32, fill: Color| {
+        draw_rectangle(fx(lx, pw) - 1.0, top + ly - 1.0, pw + 2.0, ph + 2.0, OUTLINE);
+        draw_rectangle(fx(lx, pw), top + ly, pw, ph, fill);
+    };
+    let bevel = |lx: f32, ly: f32, pw: f32, ph: f32, base: Color, hi: Color, lo: Color| {
+        part(lx, ly, pw, ph, base);
+        draw_rectangle(fx(lx, pw), top + ly, pw, 1.0, hi);
+        draw_rectangle(fx(lx, pw), top + ly + ph - 1.0, pw, 1.0, lo);
+        draw_rectangle(fx(lx, pw), top + ly, 1.0, ph, hi);
+        draw_rectangle(fx(lx, pw) + pw - 1.0, top + ly, 1.0, ph, lo);
+    };
+
+    // --- плащ: три полосы-складки разной длины, колышется ---
+    let sway = (time * 6.0).sin() * 1.5 - p.vel.x * 0.012;
+    let cloak_h = 23.0 - crouch * 0.5;
+    part(2.0 + sway, 12.0, 4.0, cloak_h, CLOAK);
+    part(6.0 + sway * 0.7, 12.0, 4.0, cloak_h - 3.0, CLOAK_DARK);
+    part(10.0 + sway * 0.4, 12.0, 3.0, cloak_h - 1.0, CLOAK);
+    // Открытый край ткани.
+    draw_rectangle(fx(2.0 + sway, 4.0), top + 12.0, 1.0, cloak_h, Color::new(0.62, 0.32, 0.26, 1.0));
+
+    // --- ножны меча за спиной (набалдашник над плечом) ---
+    part(18.0, 3.0, 4.0, 24.0, LEATHER);
+    draw_rectangle(fx(18.0, 4.0), top + 3.0, 4.0, 2.0, STEEL_DARK);
+    draw_rectangle(fx(19.0, 2.0), top - 1.0, 2.0, 4.0, GOLD);
+    draw_rectangle(fx(18.0, 4.0), top + 25.0, 4.0, 3.0, STEEL_DARK);
+
+    // --- ноги: бедро, наколенник, голень, сапог с подошвой ---
+    let leg_y = top + h - 16.0;
     let swing = leg_phase * 4.5;
     let (leg1, leg2) = if p.state == PlayerState::Run {
         (4.0 + swing, 12.0 - swing)
     } else if p.state == PlayerState::WallSlide {
-        // Ноги направлены в сторону стены.
         if facing_right {
             (6.0, 13.0)
         } else {
@@ -576,23 +1011,67 @@ fn draw_player(p: &Player, time: f32) {
     } else {
         (4.0, 12.0)
     };
-    let leg_lift = (leg_phase.abs()) * 2.0;
-    draw_rectangle(fx(leg1, 6.0), leg_y + if p.state == PlayerState::Run { leg_lift } else { 0.0 }, 6.0, 12.0, STEEL_DARK);
-    draw_rectangle(fx(leg2, 6.0), leg_y - if p.state == PlayerState::Run { leg_lift * 0.5 } else { 0.0 }, 6.0, 12.0, STEEL_DARK);
+    let leg_lift = leg_phase.abs() * 2.0;
+    let leg = |lx: f32, lift: f32| {
+        let ly = leg_y - lift;
+        part(lx, ly, 6.0, 5.0, STEEL_DARK);
+        draw_rectangle(fx(lx + 1.0, 4.0), ly + 4.0, 4.0, 3.0, STEEL);
+        part(lx, ly + 7.0, 6.0, 4.0, STEEL_DARK);
+        part(lx, ly + 10.0, 7.0, 5.0, LEATHER);
+        draw_rectangle(fx(lx, 7.0), ly + 14.0, 7.0, 1.0, OUTLINE);
+        // Заклёпка на сапоге.
+        draw_rectangle(fx(lx + 1.0, 2.0), ly + 11.0, 2.0, 2.0, GOLD);
+    };
+    leg(leg1, if p.state == PlayerState::Run { leg_lift } else { 0.0 });
+    leg(leg2, if p.state == PlayerState::Run { leg_lift * 0.5 } else { 0.0 });
 
-    // --- корпус ---
-    let torso_lx = 4.0 + lean;
-    draw_rectangle(fx(torso_lx, 16.0), top + 12.0, 16.0, 14.0, STEEL);
-    draw_rectangle(fx(torso_lx, 16.0), top + 22.0, 16.0, 4.0, STEEL_DARK);
-    // Пояс — тусклое золото.
-    draw_rectangle(fx(torso_lx + 2.0, 12.0), top + 21.0, 12.0, 2.0, GOLD);
+    // --- корпус: нагрудник с гребнем и сегментами ---
+    let tl = 4.0 + lean;
+    bevel(tl, 12.0, 16.0, 13.0, STEEL, STEEL_HI, STEEL_DARK);
+    draw_rectangle(fx(tl + 7.0, 2.0), top + 13.0, 2.0, 9.0, STEEL_HI);
+    draw_rectangle(fx(tl + 1.0, 14.0), top + 18.0, 14.0, 1.0, STEEL_DARK);
+    draw_rectangle(fx(tl + 1.0, 14.0), top + 21.0, 14.0, 1.0, STEEL_DARK);
+    draw_rectangle(fx(tl + 2.0, 2.0), top + 14.0, 2.0, 2.0, GOLD);
+    draw_rectangle(fx(tl + 12.0, 2.0), top + 14.0, 2.0, 2.0, GOLD);
 
-    // --- шлем ---
-    let helm_lx = 5.0 + lean;
-    draw_rectangle(fx(helm_lx, 14.0), top + 1.0, 14.0, 12.0, STEEL);
-    draw_rectangle(fx(helm_lx, 14.0), top + 1.0, 14.0, 3.0, STEEL_DARK);
+    // --- пояс с пряжкой ---
+    part(tl, 23.0, 16.0, 3.0, LEATHER);
+    draw_rectangle(fx(tl + 6.0, 4.0), top + 23.0, 4.0, 3.0, GOLD);
+    draw_rectangle(fx(tl + 7.0, 2.0), top + 24.0, 2.0, 1.0, CLOAK_DARK);
+
+    // --- наплечники (два яруса) ---
+    bevel(tl - 2.0, 11.0, 7.0, 5.0, STEEL, STEEL_HI, STEEL_DARK);
+    bevel(tl + 11.0, 11.0, 7.0, 5.0, STEEL, STEEL_HI, STEEL_DARK);
+    part(tl - 1.0, 15.0, 5.0, 3.0, STEEL_DARK);
+    part(tl + 12.0, 15.0, 5.0, 3.0, STEEL_DARK);
+
+    // --- руки: задняя видна слева, передняя с наружи ---
+    part(tl - 1.0, 16.0, 4.0, 7.0, STEEL_DARK);
+    part(tl + 13.0, 15.0, 5.0, 7.0, STEEL_DARK);
+    part(tl + 13.0, 21.0, 5.0, 4.0, STEEL);
+    draw_rectangle(fx(tl + 13.0, 5.0), top + 21.0, 5.0, 1.0, STEEL_HI);
+
+    // --- шлем: плюмаж, бровь, глазница, подбородок ---
+    let hl = 5.0 + lean;
+    bevel(hl, 1.0, 14.0, 12.0, STEEL, STEEL_HI, STEEL_DARK);
+    // Плюмаж из трёх сегментов (колышется).
+    let plume_sway = (time * 5.0).sin() * 1.2;
+    draw_rectangle(fx(hl + 4.0, 5.0), top - 3.0, 5.0, 4.0, CLOAK);
+    draw_rectangle(fx(hl + 3.0 + plume_sway, 5.0), top - 6.0, 5.0, 4.0, CLOAK);
+    draw_rectangle(fx(hl + 2.0 + plume_sway * 1.6, 4.0), top - 8.0, 4.0, 3.0, CLOAK_DARK);
+    draw_rectangle(fx(hl + 4.0, 6.0), top - 1.0, 6.0, 2.0, GOLD);
     // Глазница смотрит в сторону движения.
-    draw_rectangle(fx(helm_lx + 6.0, 7.0), top + 6.0, 7.0, 3.0, VISOR);
-    // Гребень — ржаво-красный.
-    draw_rectangle(fx(helm_lx + 4.0, 4.0), top - 1.0, 4.0, 3.0, CLOAK);
+    draw_rectangle(fx(hl + 6.0, 7.0), top + 5.0, 7.0, 3.0, VISOR);
+    draw_rectangle(fx(hl + 5.0, 9.0), top + 4.0, 9.0, 1.0, STEEL_HI);
+    // Тусклая янтарная искра в щели.
+    draw_rectangle(fx(hl + 11.0, 2.0), top + 6.0, 2.0, 1.0, EMBER);
+    // Подбородочный щит и дыхательные прорези.
+    draw_rectangle(fx(hl + 2.0, 10.0), top + 8.0, 10.0, 4.0, STEEL_DARK);
+    draw_rectangle(fx(hl + 8.0, 2.0), top + 9.0, 2.0, 2.0, OUTLINE);
+    draw_rectangle(fx(hl + 11.0, 2.0), top + 9.0, 2.0, 2.0, OUTLINE);
+    // Заклёпки по краю шлема.
+    draw_rectangle(fx(hl + 2.0, 2.0), top + 2.0, 2.0, 2.0, GOLD);
+    draw_rectangle(fx(hl + 10.0, 2.0), top + 2.0, 2.0, 2.0, GOLD);
+    // Шейный стояк.
+    draw_rectangle(fx(hl + 3.0, 8.0), top + 13.0, 8.0, 2.0, STEEL_DARK);
 }

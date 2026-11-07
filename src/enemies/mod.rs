@@ -482,6 +482,12 @@ pub(crate) mod palette {
     pub const SLIME: Color = Color::new(0.302, 0.373, 0.196, 1.0);
     pub const SLIME_DARK: Color = Color::new(0.184, 0.235, 0.118, 1.0);
     pub const SLIME_BELLY: Color = Color::new(0.420, 0.478, 0.263, 1.0);
+    /// Влажный блик сверху.
+    pub const SLIME_GLOSS: Color = Color::new(0.573, 0.639, 0.396, 1.0);
+    /// Кожа летучей мыши (подсветка меха).
+    pub const BAT_FUR: Color = Color::new(0.278, 0.216, 0.176, 1.0);
+    /// Рваная ткань/трапеция на костяных врагах.
+    pub const TATTER: Color = Color::new(0.353, 0.235, 0.157, 1.0);
     /// Летучая мышь — тёмно-коричневый.
     pub const BAT: Color = Color::new(0.161, 0.125, 0.106, 1.0);
     pub const BAT_WING: Color = Color::new(0.231, 0.180, 0.149, 1.0);
@@ -494,6 +500,8 @@ pub(crate) mod palette {
     pub const STEEL: Color = Color::new(0.659, 0.627, 0.592, 1.0);
     pub const STEEL_DARK: Color = Color::new(0.431, 0.408, 0.380, 1.0);
     pub const SHADOW: Color = Color::new(0.0, 0.0, 0.0, 0.35);
+    /// Обводка силуэтов (почти чёрный тёплый).
+    pub const OUTLINE: Color = Color::new(0.055, 0.047, 0.039, 1.0);
 }
 
 /// Отрисовать всех живых врагов (в детерминированном порядке).

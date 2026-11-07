@@ -110,23 +110,44 @@ pub(super) fn draw(t: &Transform, brain: &EnemyBrain, health: &Health, time: f32
 
     if brain.state == EnemyState::Rest {
         // Сложенные крылья — два тёмных «кокона» по бокам.
+        draw_rectangle(x - 3.0, y + 2.0, 5.0, h - 4.0, palette::OUTLINE);
         draw_rectangle(x - 2.0, y + 3.0, 4.0, h - 5.0, wing);
+        draw_rectangle(x + w - 2.0, y + 2.0, 5.0, h - 4.0, palette::OUTLINE);
         draw_rectangle(x + w - 2.0, y + 3.0, 4.0, h - 5.0, wing);
+        // Складки меха на «коконах».
+        draw_rectangle(x - 1.0, y + 5.0, 2.0, h - 9.0, palette::BAT_FUR);
+        draw_rectangle(x + w - 1.0, y + 5.0, 2.0, h - 9.0, palette::BAT_FUR);
     } else {
         // Развёрнутые крылья: ступеньки пикселей вверх/вниз от взмаха.
         let lift = flap * 5.0;
-        // Левое крыло.
+        // Левое крыло (с обводкой и жилками).
+        draw_rectangle(x - 8.0, y + 3.0 - lift, 8.0, 6.0, palette::OUTLINE);
+        draw_rectangle(x - 12.0, y + 6.0 - lift * 1.6, 5.0, 6.0, palette::OUTLINE);
         draw_rectangle(x - 7.0, y + 4.0 - lift, 7.0, 4.0, wing);
         draw_rectangle(x - 11.0, y + 7.0 - lift * 1.6, 4.0, 4.0, wing);
+        draw_rectangle(x - 6.0, y + 5.0 - lift, 5.0, 1.5, palette::OUTLINE);
+        draw_rectangle(x - 10.0, y + 8.0 - lift * 1.4, 3.0, 1.5, palette::OUTLINE);
         // Правое крыло.
+        draw_rectangle(x + w, y + 3.0 + lift, 8.0, 6.0, palette::OUTLINE);
+        draw_rectangle(x + w + 7.0, y + 6.0 + lift * 1.6, 5.0, 6.0, palette::OUTLINE);
         draw_rectangle(x + w, y + 4.0 + lift, 7.0, 4.0, wing);
         draw_rectangle(x + w + 7.0, y + 7.0 + lift * 1.6, 4.0, 4.0, wing);
+        draw_rectangle(x + w + 1.0, y + 5.0 + lift, 5.0, 1.5, palette::OUTLINE);
+        draw_rectangle(x + w + 8.0, y + 8.0 + lift * 1.4, 3.0, 1.5, palette::OUTLINE);
     }
 
-    // Тело.
+    // Тело: обводка, мех, морда.
+    draw_rectangle(x + 1.0, y + 1.0, w - 2.0, h - 2.0, palette::OUTLINE);
     draw_rectangle(x + 2.0, y + 2.0, w - 4.0, h - 4.0, body);
+    draw_rectangle(x + 3.0, y + 2.0, w - 6.0, 2.0, palette::BAT_FUR);
     draw_rectangle(x + 4.0, y, 4.0, 4.0, body); // ухо 1
     draw_rectangle(x + w - 8.0, y, 4.0, 4.0, body); // ухо 2
+    // Внутренняя часть ушей.
+    draw_rectangle(x + 5.0, y + 1.0, 2.0, 2.0, palette::TATTER);
+    draw_rectangle(x + w - 7.0, y + 1.0, 2.0, 2.0, palette::TATTER);
+    // Нос-конус спереди.
+    let nose_x = if t.facing >= 0.0 { x + w - 4.0 } else { x + 2.0 };
+    draw_rectangle(nose_x, y + h - 6.0, 2.0, 2.0, palette::TATTER);
 
     // Глаза: тусклая янтарная искра (без неона).
     let eye_y = y + 6.0;
