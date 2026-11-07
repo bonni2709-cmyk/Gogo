@@ -18,8 +18,22 @@ jobs:
           components: rustfmt, clippy
       - run: cargo fmt --all
       - run: cargo fmt --all -- --check
-      - run: cargo test -p lumen-core -p lumen-proxy -p lumen-youtube -p lumen-player
-      - run: cargo clippy -p lumen-core -p lumen-proxy -p lumen-youtube -p lumen-player --all-targets -- -D warnings
+      - shell: bash
+        run: cargo test -p lumen-core -p lumen-proxy -p lumen-youtube -p lumen-player 2>&1 | tee tests.log
+      - shell: bash
+        run: cargo clippy -p lumen-core -p lumen-proxy -p lumen-youtube -p lumen-player --all-targets -- -D warnings 2>&1 | tee clippy.log
+      - name: Publish Rust test diagnostics
+        if: failure()
+        shell: bash
+        run: |
+          for log in tests.log clippy.log; do
+            if [ ! -f "$log" ]; then continue; fi
+            text=$(tail -c 2800 "$log")
+            text="${text//'%'/'%25'}"
+            text="${text//$'\n'/'%0A'}"
+            text="${text//$'\r'/'%0D'}"
+            echo "::error::$text"
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: verified-source-and-lockfile

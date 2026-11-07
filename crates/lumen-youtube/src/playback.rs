@@ -52,26 +52,55 @@ struct Gateway {
     slots: Arc<Semaphore>,
 }
 
-fn valid_range(range: &str) -> bool {
-    if range.len() > 80 { return false; }
-    let Some(value) = range.strip_prefix("bytes=") else { return false; };
-    let Some((start, end)) = value.split_once('-') else { return false; };
-    if !start.bytes().all(|b| b.is_ascii_digit()) || !end.bytes().all(|b| b.is_ascii_digit()) { return false; }
-    if start.is_empty() { return end.parse::<u64>().is_ok_and(|n| n > 0); }
-    let Ok(start) = start.parse::<u64>() else { return false; };
-    end.is_empty() || end.parse::<u64>().is_ok_and(|end| end >= start)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ByteRange {
+    From { start: u64, end: Option<u64> },
+    Suffix(u64),
 }
 
-fn response_headers(status: StatusCode, headers: &HeaderMap, ranged: bool) -> Result<(HeaderMap, u64)> {
-    if (ranged && status != StatusCode::PARTIAL_CONTENT) || (!ranged && status != StatusCode::OK) { bail!("unexpected CDN status"); }
+fn decimal(value: &str) -> Option<u64> {
+    if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) { return None; }
+    value.parse().ok()
+}
+
+fn parse_range(range: &str) -> Option<ByteRange> {
+    if range.len() > 80 { return None; }
+    let (start, end) = range.strip_prefix("bytes=")?.split_once('-')?;
+    if start.is_empty() { return decimal(end).filter(|n| *n > 0).map(ByteRange::Suffix); }
+    let start = decimal(start)?;
+    let end = if end.is_empty() { None } else { Some(decimal(end)?) };
+    if end.is_some_and(|end| end < start) { return None; }
+    Some(ByteRange::From { start, end })
+}
+
+impl ByteRange {
+    fn resolve(self, total: u64) -> Option<(u64, u64)> {
+        let last = total.checked_sub(1)?;
+        match self {
+            Self::Suffix(length) => Some((total.saturating_sub(length), last)),
+            Self::From { start, end } if start < total => Some((start, end.unwrap_or(last).min(last))),
+            _ => None,
+        }
+    }
+}
+
+fn response_headers(status: StatusCode, headers: &HeaderMap, requested: Option<ByteRange>) -> Result<(HeaderMap, u64)> {
+    let expected_status = if requested.is_some() { StatusCode::PARTIAL_CONTENT } else { StatusCode::OK };
+    if status != expected_status { bail!("unexpected CDN status"); }
     if headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).and_then(|s| s.split(';').next()) != Some("video/mp4") { bail!("CDN is not MP4"); }
-    let length = headers.get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok()).filter(|n| *n > 0).ok_or_else(|| anyhow::anyhow!("CDN content length missing"))?;
-    if ranged {
+    if headers.get(header::CONTENT_ENCODING).is_some_and(|v| v.as_bytes() != b"identity") { bail!("encoded media response is not supported"); }
+    let length = headers.get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(decimal).filter(|n| *n > 0).ok_or_else(|| anyhow::anyhow!("CDN content length missing"))?;
+    let range_count = headers.get_all(header::CONTENT_RANGE).iter().count();
+    if let Some(requested) = requested {
+        if range_count != 1 { bail!("ambiguous CDN range"); }
         let range = headers.get(header::CONTENT_RANGE).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("bytes ")).ok_or_else(|| anyhow::anyhow!("invalid CDN range"))?;
         let (interval, total) = range.split_once('/').ok_or_else(|| anyhow::anyhow!("invalid CDN range"))?;
         let (start, end) = interval.split_once('-').ok_or_else(|| anyhow::anyhow!("invalid CDN range"))?;
-        let (start, end, total) = (start.parse::<u64>()?, end.parse::<u64>()?, total.parse::<u64>()?);
-        if end < start || end >= total || end.checked_sub(start).and_then(|n| n.checked_add(1)) != Some(length) { bail!("inconsistent CDN range"); }
+        let numbers = (decimal(start), decimal(end), decimal(total));
+        let (Some(start), Some(end), Some(total)) = numbers else { bail!("invalid CDN range numbers"); };
+        if requested.resolve(total) != Some((start, end)) || end.checked_sub(start).and_then(|n| n.checked_add(1)) != Some(length) { bail!("CDN returned a different or inconsistent byte range"); }
+    } else if range_count != 0 {
+        bail!("unexpected partial range on a full response");
     }
     let mut output = HeaderMap::new();
     for name in [header::CONTENT_TYPE, header::CONTENT_LENGTH, header::CONTENT_RANGE] {
@@ -88,7 +117,7 @@ async fn media(State(state): State<Arc<Gateway>>, Path(token): Path<String>, met
     if token != state.capability || headers.get(header::HOST).and_then(|h| h.to_str().ok()) != Some(state.address.to_string().as_str()) { return empty(StatusCode::NOT_FOUND); }
     let Ok(permit) = state.slots.clone().try_acquire_owned() else { return empty(StatusCode::TOO_MANY_REQUESTS); };
     let range = match headers.get(header::RANGE) {
-        Some(value) => match value.to_str() { Ok(value) if valid_range(value) => Some(value), _ => return empty(StatusCode::RANGE_NOT_SATISFIABLE) },
+        Some(value) => match value.to_str() { Ok(value) if parse_range(value).is_some() => Some(value), _ => return empty(StatusCode::RANGE_NOT_SATISFIABLE) },
         None => None,
     };
     let upstream = tokio::select! {
@@ -97,7 +126,7 @@ async fn media(State(state): State<Arc<Gateway>>, Path(token): Path<String>, met
     };
     let Ok(upstream) = upstream else { return empty(StatusCode::BAD_GATEWAY); };
     let status = upstream.status();
-    let Ok((output, length)) = response_headers(status, upstream.headers(), range.is_some()) else { return empty(StatusCode::BAD_GATEWAY); };
+    let Ok((output, length)) = response_headers(status, upstream.headers(), range.and_then(parse_range)) else { return empty(StatusCode::BAD_GATEWAY); };
     let body = if method == Method::HEAD { Body::empty() } else {
         let cancel = state.cancel.clone();
         let stream = futures_util::stream::try_unfold((upstream, length, permit, cancel), |(mut response, remaining, permit, cancel)| async move {
@@ -128,8 +157,8 @@ mod tests {
     use super::*;
     #[test]
     fn accepts_only_single_bounded_byte_range() {
-        for value in ["bytes=0-", "bytes=0-99", "bytes=-1024"] { assert!(valid_range(value)); }
-        for value in ["bytes=", "bytes=-", "bytes=-0", "bytes=10-9", "bytes=0-1,4-9", "bytes=18446744073709551616-", "other=0-1", "bytes=+0-1", "bytes=0-+1"] { assert!(!valid_range(value)); }
+        for value in ["bytes=0-", "bytes=0-99", "bytes=-1024"] { assert!(parse_range(value).is_some()); }
+        for value in ["bytes=", "bytes=-", "bytes=-0", "bytes=10-9", "bytes=0-1,4-9", "bytes=18446744073709551616-", "other=0-1", "bytes=+0-1", "bytes=0-+1"] { assert!(parse_range(value).is_none()); }
     }
     #[test]
     fn rejects_bad_media_headers_and_copies_no_tokens() {
@@ -138,13 +167,41 @@ mod tests {
         headers.insert(header::CONTENT_LENGTH, "10".parse().unwrap());
         headers.insert(header::CONTENT_RANGE, "bytes 0-9/100".parse().unwrap());
         headers.insert(header::SET_COOKIE, "private=token".parse().unwrap());
-        let (output, length) = response_headers(StatusCode::PARTIAL_CONTENT, &headers, true).unwrap();
+        let (output, length) = response_headers(StatusCode::PARTIAL_CONTENT, &headers, parse_range("bytes=0-9")).unwrap();
         assert_eq!(length, 10);
         assert!(!output.contains_key(header::SET_COOKIE));
-        assert!(response_headers(StatusCode::OK, &headers, true).is_err());
+        assert!(response_headers(StatusCode::OK, &headers, parse_range("bytes=0-9")).is_err());
         headers.insert(header::CONTENT_RANGE, "bytes 0-10/100".parse().unwrap());
-        assert!(response_headers(StatusCode::PARTIAL_CONTENT, &headers, true).is_err());
+        assert!(response_headers(StatusCode::PARTIAL_CONTENT, &headers, parse_range("bytes=0-9")).is_err());
     }
+    #[test]
+    fn resolves_open_bounded_and_suffix_ranges_without_overflow() {
+        for (value, expected) in [
+            ("bytes=10-19", Some((10, 19))), ("bytes=30-", Some((30, 35))),
+            ("bytes=-5", Some((31, 35))), ("bytes=-100", Some((0, 35))),
+            ("bytes=30-999", Some((30, 35))), ("bytes=36-", None),
+            ("bytes=18446744073709551615-", None),
+        ] {
+            assert_eq!(parse_range(value).unwrap().resolve(36), expected, "{value}");
+        }
+        assert_eq!(parse_range("bytes=0-").unwrap().resolve(0), None);
+    }
+
+    #[test]
+    fn rejects_shifted_ambiguous_encoded_and_unrequested_ranges() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_TYPE, "video/mp4".parse().unwrap());
+        headers.insert(header::CONTENT_LENGTH, "10".parse().unwrap());
+        headers.insert(header::CONTENT_RANGE, "bytes 0-9/100".parse().unwrap());
+        assert!(response_headers(StatusCode::PARTIAL_CONTENT, &headers, parse_range("bytes=10-19")).is_err());
+        assert!(response_headers(StatusCode::OK, &headers, None).is_err());
+        headers.insert(header::CONTENT_ENCODING, "gzip".parse().unwrap());
+        assert!(response_headers(StatusCode::PARTIAL_CONTENT, &headers, parse_range("bytes=0-9")).is_err());
+        headers.remove(header::CONTENT_ENCODING);
+        headers.append(header::CONTENT_RANGE, "bytes 0-9/100".parse().unwrap());
+        assert!(response_headers(StatusCode::PARTIAL_CONTENT, &headers, parse_range("bytes=0-9")).is_err());
+    }
+
     #[tokio::test]
     async fn enforces_capability_host_and_range_before_upstream() {
         let proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -177,3 +234,8 @@ mod tests {
     }
 
 }
+
+
+#[cfg(test)]
+#[path = "playback_transport_tests.rs"]
+mod transport_tests;

@@ -185,3 +185,13 @@ Instrumentation smoke запускает настоящую MainActivity (Native
 В эмуляторе API 35/x86_64 подтверждены: запуск NativeActivity, Media3 READY + isPlaying для синтетического H.264/AAC MP4, seek, release ExoPlayer при stop, recreate/playing при resume и JNI close callback с неизвестным ID при закрытии player. Сам тест не вызывает production Rust→Java `openPlayer` и не использует production Rust gateway.
 
 Первый прогон выявил ошибку тестового harness: `ActivityScenario.launch()` очищает предыдущий task (`NEW_TASK | CLEAR_TASK`), после чего обращение к прежней Activity через `onActivity` недопустимо. Тест теперь явно ожидает `DESTROYED` для прежнего host, сохраняя все проверки Media3. Это не доказательство поведения обычного перехода MainActivity→PlayerActivity в одном task; его ещё нужно проверить отдельно.
+
+## Интеграционные тесты Rust gateway / CONNECT / TLS
+
+Добавлен полностью локальный integration fixture: production `PlaybackSession` и reqwest-клиент → тестовый CONNECT-прокси → TLS origin с проверяемым сертификатом `rr1.googlevideo.com`. Proxy fixture перенаправляет только этот CONNECT на локальный TLS listener. Исключений для localhost/private IP в production DNS/allowlist не добавлено; доверенный тестовый сертификат существует только в `#[cfg(test)]`.
+
+Покрытие: полное чтение MP4-подобных байтов, HEAD без body, bounded/open/suffix Range для seek, отказ при недоверенном сертификате, запрет CDN redirect, обрыв неполного body и отмена активного stalled stream при Drop сессии. Проверяется, что cookies/служебные CDN headers не передаются плееру. Это не настоящий MP4 decode-тест (его отдельно выполняет Android emulator smoke).
+
+Исправление production gateway: Content-Range теперь сопоставляется с **исходным запросом**, а не проверяется только на внутреннюю согласованность. Шлюз отвергает другой диапазон, дублирующий Content-Range, partial headers на полном ответе и encoded body. Граничные диапазоны вычисляются без переполнения с учётом размера объекта. Если CDN вернул `bytes 0-9/100` на запрос `bytes=10-19`, плеер получит 502 без ошибочных медиабайтов.
+
+Граница покрытия: CONNECT-прокси в этом fixture — тестовая реализация, **не** crate `lumen-proxy`. Production CONNECT/SOCKS handlers и transport core имеют отдельные тесты. Доступность YouTube, фактический DPI и физические устройства этими тестами не подтверждаются. До выполнения обновлённого CI успешность новых тестов не заявляется.
