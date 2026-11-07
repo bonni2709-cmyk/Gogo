@@ -93,7 +93,19 @@ pub enum PlayerState {
     Fall,
     WallSlide,
     Dash,
+    /// Короткое оглушение после получения урона.
+    Hurt,
 }
+
+/// Максимум очков здоровья («сердец» в HUD).
+pub const PLAYER_MAX_HP: u32 = 5;
+/// Кадры неуязвимости после получения урона, с.
+pub const PLAYER_IFRAMES: f32 = 1.0;
+/// Потеря управления после удара (отброс), с.
+pub const HURT_LOCK_TIME: f32 = 0.32;
+/// Сила отброса при получении урона.
+const HURT_KNOCK_X: f32 = 300.0;
+const HURT_KNOCK_Y: f32 = 330.0;
 
 pub struct Player {
     /// Левый верхний угол хитбокса.
@@ -110,8 +122,16 @@ pub struct Player {
     pub on_ground: bool,
     /// Ближайшая стена: `-1` — слева, `1` — справа, `0` — нет.
     pub wall_dir: f32,
+    /// Текущее здоровье (очки).
+    pub hp: u32,
+    /// Максимум здоровья.
+    pub max_hp: u32,
 
     // --- внутренние таймеры ---
+    /// i-frames от полученного урона (не от рывка).
+    iframe_timer: f32,
+    /// Потеря управления после удара.
+    hurt_timer: f32,
     coyote_timer: f32,
     jump_buffer: f32,
     dash_timer: f32,
@@ -135,6 +155,10 @@ impl Player {
             state_time: 0.0,
             on_ground: false,
             wall_dir: 0.0,
+            hp: PLAYER_MAX_HP,
+            max_hp: PLAYER_MAX_HP,
+            iframe_timer: 0.0,
+            hurt_timer: 0.0,
             coyote_timer: 0.0,
             jump_buffer: 0.0,
             dash_timer: 0.0,
@@ -175,12 +199,41 @@ impl Player {
         self.wall_sliding
     }
 
+    /// Есть ли кадры неуязвимости от полученного урона (мигание при рендере).
+    pub fn is_hurt_flashing(&self) -> bool {
+        self.iframe_timer > 0.0
+    }
+
+    /// Неуязвим ли сейчас: i-frames после удара или кадры рывка.
+    pub fn is_invulnerable(&self) -> bool {
+        self.iframe_timer > 0.0 || self.has_dash_iframes()
+    }
+
+    /// Получение урона: отбрасывание, i-frames и короткая потеря
+    /// управления. `knock_dir` — направление отброса (`-1` — влево).
+    /// Возвращает `true`, если урон применился (иначе — i-frames/смерть).
+    pub fn take_damage(&mut self, amount: u32, knock_dir: f32) -> bool {
+        if self.hp == 0 || self.is_invulnerable() {
+            return false;
+        }
+        self.hp = self.hp.saturating_sub(amount);
+        self.iframe_timer = PLAYER_IFRAMES;
+        self.hurt_timer = HURT_LOCK_TIME;
+        self.dashing = false;
+        self.vel = Vec2::new(knock_dir * HURT_KNOCK_X, -HURT_KNOCK_Y);
+        self.state = PlayerState::Hurt;
+        self.state_time = 0.0;
+        true
+    }
+
     /// Полный шаг симуляции игрока на фиксированном dt.
     pub fn update(&mut self, input: &PlayerInput, world: &World, dt: f32) {
         debug_assert!(dt > 0.0, "шаг симуляции должен быть положительным");
 
         // --- таймеры ---
         self.state_time += dt;
+        self.iframe_timer -= dt;
+        self.hurt_timer -= dt;
         self.coyote_timer -= dt;
         self.jump_buffer -= dt;
         self.dash_cooldown -= dt;
@@ -188,12 +241,23 @@ impl Player {
         self.wall_regrab_delay -= dt;
         self.wall_sliding = false;
 
-        let move_x = input.move_x.clamp(-1.0, 1.0);
+        // После удара управление отключено на HURT_LOCK_TIME — тело
+        // только летит по инерции и падает под гравитацией.
+        let stunned = self.hurt_timer > 0.0;
+
+        let move_x = if stunned {
+            0.0
+        } else {
+            input.move_x.clamp(-1.0, 1.0)
+        };
 
         // --- проба стен (до логики прыжка/скольжения) ---
         self.wall_dir = self.probe_wall(world);
 
-        if self.dashing {
+        if stunned {
+            // ---------- ОГЛУШЕНИЕ (отброс после урона) ----------
+            apply_gravity(&mut self.vel, dt, GRAVITY, MAX_FALL_SPEED);
+        } else if self.dashing {
             // ---------- DASH ----------
             self.dash_timer -= dt;
             self.vel.x = self.facing * DASH_SPEED;
@@ -299,7 +363,9 @@ impl Player {
         }
 
         // ---------- производное состояние для анимации ----------
-        let new_state = if self.dashing {
+        let new_state = if stunned {
+            PlayerState::Hurt
+        } else if self.dashing {
             PlayerState::Dash
         } else if self.on_ground {
             if self.vel.x.abs() > 12.0 {
@@ -493,5 +559,47 @@ mod tests {
             player.vel.y < 0.0,
             "в пределах Coyote Time прыжок обязан сработать"
         );
+    }
+
+    #[test]
+    fn take_damage_knockback_and_iframes() {
+        let (world, spawn) = flat_world();
+        let mut player = Player::new(spawn);
+        let idle = PlayerInput::default();
+
+        assert_eq!(player.hp, PLAYER_MAX_HP);
+        assert!(player.take_damage(1, -1.0));
+        assert_eq!(player.hp, PLAYER_MAX_HP - 1);
+        assert_eq!(player.state, PlayerState::Hurt);
+        assert!(player.vel.x < 0.0, "отброс в сторону удара");
+        assert!(player.vel.y < 0.0, "подброс вверх");
+        assert!(player.is_invulnerable());
+        assert!(player.is_hurt_flashing());
+
+        // Второй удар в кадр i-frames не проходит.
+        assert!(!player.take_damage(1, 1.0));
+        assert_eq!(player.hp, PLAYER_MAX_HP - 1);
+
+        // Через i-frames и время потери управления — полный контроль.
+        let steps = ((PLAYER_IFRAMES + HURT_LOCK_TIME + 0.1) / FIXED_DT) as u32;
+        for _ in 0..steps {
+            player.update(&idle, &world, FIXED_DT);
+        }
+        assert!(!player.is_invulnerable());
+        assert_ne!(player.state, PlayerState::Hurt);
+        assert!(player.take_damage(1, 1.0), "после i-frames урон проходит");
+    }
+
+    #[test]
+    fn respawn_restores_full_hp() {
+        let (_world, spawn) = flat_world();
+        let mut player = Player::new(spawn);
+        assert!(player.take_damage(3, -1.0));
+        assert!(player.hp < player.max_hp);
+
+        player.respawn(spawn);
+        assert_eq!(player.hp, player.max_hp);
+        assert_eq!(player.state, PlayerState::Idle);
+        assert!(!player.is_invulnerable());
     }
 }

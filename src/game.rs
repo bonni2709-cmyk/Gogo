@@ -7,6 +7,7 @@
 
 use macroquad::prelude::*;
 
+use crate::enemies::{draw_enemies, EnemyKind, EnemyWorld};
 use crate::physics::{Aabb, World, FIXED_DT};
 use crate::player::{Player, PlayerInput, PlayerState};
 
@@ -38,6 +39,9 @@ const VISOR: Color = Color::new(0.078, 0.067, 0.059, 1.0);
 const GOLD: Color = Color::new(0.769, 0.627, 0.290, 1.0);
 const TEXT_DIM: Color = Color::new(0.549, 0.510, 0.471, 1.0);
 const TEXT_MAIN: Color = Color::new(0.847, 0.812, 0.769, 1.0);
+const HEART_FILL: Color = Color::new(0.549, 0.161, 0.129, 1.0);
+const HEART_SHINE: Color = Color::new(0.706, 0.294, 0.235, 1.0);
+const HEART_EMPTY: Color = Color::new(0.278, 0.227, 0.208, 1.0);
 
 /// Верхняя строка пола (мировые координаты) — линия горизонта для параллакса.
 const HORIZON: f32 = 14.0 * TILE;
@@ -76,6 +80,7 @@ pub async fn run() {
 struct Game {
     world: World,
     player: Player,
+    enemies: EnemyWorld,
     cam_pos: Vec2,
     time: f32,
     fps_smooth: f32,
@@ -87,10 +92,15 @@ struct Game {
 
 impl Game {
     fn new() -> Self {
-        let (world, spawn) = build_level();
+        let level = build_level();
+        let mut enemies = EnemyWorld::new();
+        for (kind, pos) in level.enemy_spawns {
+            enemies.spawn(kind, pos);
+        }
         Self {
-            world,
-            player: Player::new(spawn),
+            world: level.world,
+            player: Player::new(level.spawn),
+            enemies,
             cam_pos: spawn_point() + Vec2::new(0.0, -40.0),
             time: 0.0,
             fps_smooth: 60.0,
@@ -135,10 +145,23 @@ impl Game {
         self.dash_edge = false;
 
         self.player.update(&input, &self.world, FIXED_DT);
+
+        // Шаг ИИ врагов; возвращаются контакты, задевшие игроку.
+        let hits = self.enemies.update(&self.world, &self.player, FIXED_DT);
+        for hit in hits {
+            let player_center = self.player.body().center();
+            let knock_dir = if hit.center.x >= player_center.x {
+                -1.0
+            } else {
+                1.0
+            };
+            self.player.take_damage(hit.damage, knock_dir);
+        }
+
         self.time += FIXED_DT;
 
-        // Падение в пустоту — возврат на чекпоинт.
-        if self.player.pos.y > VOID_Y {
+        // Падение в пустоту или смерть — возврат на чекпоинт с полным HP.
+        if self.player.pos.y > VOID_Y || self.player.hp == 0 {
             self.player.respawn(spawn_point());
         }
     }
@@ -168,6 +191,7 @@ impl Game {
         draw_parallax(&self.cam_pos, &view);
         draw_tiles(&self.world, &self.cam_pos, &view);
         draw_torches(self.time);
+        draw_enemies(&self.enemies, self.time);
         draw_player(&self.player, self.time);
 
         set_default_camera();
@@ -194,6 +218,7 @@ impl Game {
             PlayerState::Fall => "FALL",
             PlayerState::WallSlide => "WALL SLIDE",
             PlayerState::Dash => "DASH",
+            PlayerState::Hurt => "HURT",
         };
         draw_text(
             &format!("STATE: {state}"),
@@ -202,6 +227,19 @@ impl Game {
             20.0,
             TEXT_DIM,
         );
+
+        // Здоровье: ряд «сердец»-квадратов (пиксельный стиль, ASCII-шрифт
+        // не содержит глифов сердец).
+        for i in 0..self.player.max_hp {
+            let hx = 12.0 + i as f32 * 18.0;
+            let hy = 70.0;
+            if i < self.player.hp {
+                draw_rectangle(hx, hy, 14.0, 14.0, HEART_FILL);
+                draw_rectangle(hx + 2.0, hy + 2.0, 4.0, 4.0, HEART_SHINE);
+            } else {
+                draw_rectangle_lines(hx, hy, 14.0, 14.0, 1.0, HEART_EMPTY);
+            }
+        }
         // Шрифт по умолчанию в macroquad — только ASCII, поэтому HUD на латинице.
         draw_text(
             "A/D - move   SPACE - jump   SHIFT - dash",
@@ -234,9 +272,17 @@ fn fill(world: &mut World, tx: i32, ty: i32, w: i32, h: i32) {
     ));
 }
 
+/// Готовый уровень: геометрия, точка спавна игрока и расстановка врагов.
+struct Level {
+    world: World,
+    spawn: Vec2,
+    enemy_spawns: Vec<(EnemyKind, Vec2)>,
+}
+
 /// Демо-уровень ядра: пол с ямой (Coyote Time), платформы, стена для
-/// Wall Slide. Генерация уровней (TMX/JSON) подключается отдельным модулем.
-fn build_level() -> (World, Vec2) {
+/// Wall Slide и первые враги (FSM). Генерация уровней (TMX/JSON)
+/// подключается отдельным модулем.
+fn build_level() -> Level {
     let mut world = World::new();
 
     // Пол слева от ямы и справа.
@@ -257,7 +303,21 @@ fn build_level() -> (World, Vec2) {
     fill(&mut world, -8, 6, 1, 8);
     fill(&mut world, 60, 6, 4, 8);
 
-    (world, spawn_point())
+    // Расстановка врагов (левый верхний угол хитбокса):
+    // два слизня на полу, скелет у правой стены, летучая мышь над ямой.
+    let floor_top = 14.0 * TILE;
+    let enemy_spawns = vec![
+        (EnemyKind::Slime, Vec2::new(10.0 * TILE, floor_top - 20.0)),
+        (EnemyKind::Slime, Vec2::new(36.0 * TILE, floor_top - 20.0)),
+        (EnemyKind::Skeleton, Vec2::new(44.0 * TILE, floor_top - 38.0)),
+        (EnemyKind::Bat, Vec2::new(21.5 * TILE, 9.0 * TILE)),
+    ];
+
+    Level {
+        world,
+        spawn: spawn_point(),
+        enemy_spawns,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -406,6 +466,11 @@ fn draw_torches(time: f32) {
 
 /// Рыцарь из прямоугольников: поза зависит от состояния, взгляд — от `facing`.
 fn draw_player(p: &Player, time: f32) {
+    // Мигание при i-frames после получения урона.
+    if p.is_hurt_flashing() && ((time * 20.0) as i32) % 2 == 0 {
+        return;
+    }
+
     let x = p.pos.x;
     let y = p.pos.y;
     let w = p.size.x;
@@ -465,6 +530,11 @@ fn draw_player(p: &Player, time: f32) {
             // Прижатие к стене: корпус чуть ниже, ноги подобраны.
             crouch = 3.0;
             leg_phase = 0.7;
+        }
+        PlayerState::Hurt => {
+            // Отброс: тело напряжено, ноги в напряжённой стойке.
+            crouch = 2.0;
+            leg_phase = 0.6;
         }
         PlayerState::Dash => {
             crouch = 6.0;
