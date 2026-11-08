@@ -15,6 +15,7 @@
 pub mod ecs;
 pub mod enemies;
 pub mod game;
+pub mod level;
 pub mod particles;
 pub mod physics;
 pub mod player;

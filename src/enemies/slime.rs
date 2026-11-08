@@ -141,6 +141,27 @@ pub(super) fn draw(t: &Transform, brain: &EnemyBrain, health: &Health, time: f32
     // Тёмные пятна-вкрапления.
     draw_rectangle(dx + dw * 0.55, dy + dh * 0.72, 4.0, 3.0, palette::SLIME_DARK);
     draw_rectangle(dx + dw * 0.2, dy + dh * 0.8, 3.0, 2.0, palette::SLIME_DARK);
+    // Ядро, просвечивающее сквозь желе.
+    draw_rectangle(
+        dx + dw * 0.40,
+        dy + dh * 0.50 + bubble * 0.5,
+        5.0,
+        4.0,
+        Color::new(0.42, 0.50, 0.26, 0.6),
+    );
+    // Капли слизи, стекающие на землю.
+    for i in 0..2 {
+        let drop_phase = (time * 1.3 + i as f32 * 0.7 + x * 0.07).rem_euclid(1.0);
+        let drop_x = dx + 6.0 + i as f32 * (dw - 14.0).max(4.0);
+        let drop_y = dy + dh - 2.0 + drop_phase * 6.0;
+        draw_rectangle(
+            drop_x,
+            drop_y,
+            2.0,
+            3.0,
+            Color::new(0.42, 0.50, 0.26, (1.0 - drop_phase) * 0.7),
+        );
+    }
 
     // Глаза смотрит в сторону движения.
     let eye_y = dy + dh * 0.42;

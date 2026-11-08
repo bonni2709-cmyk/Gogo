@@ -228,4 +228,12 @@ pub(super) fn draw(t: &Transform, brain: &EnemyBrain, health: &Health, time: f32
     // Ножны/ремень на торсе.
     draw_rectangle(fx(4.0, 18.0), y + 22.0, 18.0, 3.0, palette::RUST);
     draw_rectangle_lines(fx(5.0, 16.0), y + 12.0, 14.0, 14.0, 1.0, bone_dark);
+    // Подсветка рёбер: тонкие светлые линии.
+    draw_rectangle(fx(7.0, 12.0), y + 15.0, 12.0, 1.0, Color::new(0.88, 0.85, 0.76, 0.8));
+    draw_rectangle(fx(7.0, 12.0), y + 19.0, 12.0, 1.0, Color::new(0.88, 0.85, 0.76, 0.7));
+    // Трещина на черепе.
+    draw_rectangle(fx(14.0, 1.0), y + 6.0, 1.0, 4.0, palette::SOCKET);
+    // Рваная тряпка на поясе.
+    draw_rectangle(fx(15.0, 5.0), y + 25.0, 5.0, 4.0, palette::TATTER);
+    draw_rectangle(fx(16.0, 3.0), y + 29.0, 3.0, 2.0, palette::TATTER);
 }

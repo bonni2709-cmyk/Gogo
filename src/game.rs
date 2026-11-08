@@ -65,6 +65,13 @@ const OUTLINE: Color = Color::new(0.055, 0.047, 0.039, 1.0);
 const LEATHER: Color = Color::new(0.310, 0.220, 0.149, 1.0);
 /// Светлая сталь (края доспеха).
 const STEEL_HI: Color = Color::new(0.804, 0.773, 0.722, 1.0);
+
+/// Кость (черепа, шипы, детали).
+const BONE: Color = Color::new(0.780, 0.745, 0.635, 1.0);
+/// Ржавчина: следы старых боёв на камне.
+const RUST_W: Color = Color::new(0.447, 0.278, 0.157, 1.0);
+/// Тёмное золото для филиграни.
+const GOLD_DARK: Color = Color::new(0.549, 0.427, 0.196, 1.0);
 /// Тёмная кожа/подкладка плаща.
 const CLOAK_DARK: Color = Color::new(0.302, 0.137, 0.118, 1.0);
 /// Туман на горизонте.
@@ -74,10 +81,6 @@ const FOG: Color = Color::new(0.360, 0.333, 0.302, 1.0);
 const HORIZON: f32 = 14.0 * TILE;
 
 /// Точка возрождения.
-fn spawn_point() -> Vec2 {
-    Vec2::new(2.0 * TILE, HORIZON - crate::player::PLAYER_HEIGHT)
-}
-
 /// Запасной потолок: ниже — падение в пустоту и респавн.
 const VOID_Y: f32 = 30.0 * TILE;
 
@@ -104,6 +107,62 @@ pub async fn run() {
     }
 }
 
+/// Движущаяся платформа: синусоидальный челнок по одной оси.
+struct Mover {
+    base: Vec2,
+    size: Vec2,
+    axis_x: bool,
+    range: f32,
+    speed: f32,
+    phase: f32,
+    /// Текущее смещение по оси (обновляется каждый фиксированный шаг).
+    offset: f32,
+    /// Дельта смещения за последний шаг — на неё переносим игрока.
+    delta: f32,
+}
+
+impl Mover {
+    fn new(def: &crate::level::MoverDef) -> Self {
+        Mover {
+            base: Vec2::new(def.x, def.y),
+            size: Vec2::new(def.w, def.h),
+            axis_x: def.axis_x,
+            range: def.range,
+            speed: def.speed,
+            phase: def.phase,
+            offset: 0.0,
+            delta: 0.0,
+        }
+    }
+
+    fn advance(&mut self, time: f32) {
+        let off = (time * self.speed + self.phase).sin() * self.range;
+        self.delta = off - self.offset;
+        self.offset = off;
+    }
+
+    fn rect(&self) -> Aabb {
+        let (x, y) = if self.axis_x {
+            (self.base.x + self.offset, self.base.y)
+        } else {
+            (self.base.x, self.base.y + self.offset)
+        };
+        Aabb::new(x, y, self.size.x, self.size.y)
+    }
+}
+
+/// Чекпоинт: фонарь, зажигающийся при касании; точка возрождения.
+struct Checkpoint {
+    pos: Vec2,
+    lit: bool,
+}
+
+/// Монета: собирается при касании, идёт в счётчик золота.
+struct Coin {
+    pos: Vec2,
+    taken: bool,
+}
+
 struct Game {
     world: World,
     player: Player,
@@ -127,20 +186,54 @@ struct Game {
     swing_hits: Vec<crate::ecs::Entity>,
     /// Номер свинга, обработанный в `swing_hits`.
     last_swing: u32,
+    // --- уровень: платформы, ловушки, чекпоинты, золото ---
+    movers: Vec<Mover>,
+    spikes: Vec<Aabb>,
+    checkpoints: Vec<Checkpoint>,
+    coins: Vec<Coin>,
+    /// Декор-тайлы уровня (лианы, цепи, черепа, знамёна, щебень).
+    decor: Vec<(i32, i32, crate::level::Decor)>,
+    /// Факелы уровня.
+    torches: Vec<(f32, f32)>,
+    /// Собранное золото.
+    gold: u32,
+    /// Точка возрождения (обновляется чекпоинтами).
+    respawn_point: Vec2,
+    /// Платформа, на которой стоит игрок (индекс) — для переноски.
+    on_mover: Option<usize>,
 }
 
 impl Game {
     fn new() -> Self {
-        let level = build_level();
+        let level = crate::level::load_level1();
         let mut enemies = EnemyWorld::new();
-        for (kind, pos) in level.enemy_spawns {
-            enemies.spawn(kind, pos);
+        for (kind, pos) in &level.enemy_spawns {
+            enemies.spawn(*kind, *pos);
         }
+        let spawn = level.spawn;
+        let movers = level.movers.iter().map(Mover::new).collect();
         Self {
             world: level.world,
-            player: Player::new(level.spawn),
+            player: Player::new(spawn),
             enemies,
-            cam_pos: spawn_point() + Vec2::new(0.0, -40.0),
+            movers,
+            spikes: level.spikes,
+            checkpoints: level
+                .checkpoints
+                .iter()
+                .map(|p| Checkpoint { pos: *p, lit: false })
+                .collect(),
+            coins: level
+                .coins
+                .iter()
+                .map(|p| Coin { pos: *p, taken: false })
+                .collect(),
+            decor: level.decor,
+            torches: level.torches,
+            gold: 0,
+            respawn_point: spawn,
+            on_mover: None,
+            cam_pos: spawn + Vec2::new(0.0, -40.0),
             time: 0.0,
             fps_smooth: 60.0,
             jump_edge: false,
@@ -209,7 +302,52 @@ impl Game {
         self.dash_edge = false;
         self.attack_edge = false;
 
+        // ---------- ДВИЖУЩИЕСЯ ПЛАТФОРМЫ: шаг и переноска ----------
+        for m in &mut self.movers {
+            m.advance(self.time);
+        }
+        if let Some(i) = self.on_mover {
+            let d = self.movers[i].delta;
+            self.player.pos += if self.movers[i].axis_x {
+                Vec2::new(d, 0.0)
+            } else {
+                Vec2::new(0.0, d)
+            };
+        }
+
         self.player.update(&input, &self.world, FIXED_DT);
+
+        // ---------- ПЛАТФОРМЫ: выталкивание + езда сверху ----------
+        self.on_mover = None;
+        for (i, m) in self.movers.iter().enumerate() {
+            let r = m.rect();
+            let pb = self.player.body();
+            if !pb.overlaps(&r) {
+                continue;
+            }
+            let push_up = pb.bottom() - r.top();
+            let push_down = r.bottom() - pb.top();
+            let push_left = pb.right() - r.left();
+            let push_right = r.right() - pb.left();
+            let side = push_left.min(push_right);
+            if push_up <= side.min(push_down) && self.player.vel.y >= -20.0 {
+                // Приехали сверху — стоим на платформе.
+                self.player.pos.y -= push_up;
+                self.player.vel.y = 0.0;
+                self.player.on_ground = true;
+                self.on_mover = Some(i);
+            } else if push_down <= side {
+                // Удар головой снизу.
+                self.player.pos.y += push_down;
+                if self.player.vel.y < 0.0 {
+                    self.player.vel.y = 0.0;
+                }
+            } else if push_left <= push_right {
+                self.player.pos.x -= push_left;
+            } else {
+                self.player.pos.x += push_right;
+            }
+        }
 
         // ---------- УДАРЫ МЕЧОМ: хитбокс активных кадров ----------
         if self.player.is_attacking() && self.player.is_attack_active() {
@@ -264,12 +402,52 @@ impl Game {
             self.player.take_damage(hit.damage, knock_dir);
         }
 
+        // ---------- ЛОВУШКИ: шипы ----------
+        let player_body = self.player.body();
+        for s in &self.spikes {
+            if player_body.overlaps(s) {
+                let dir = if player_body.center().x >= s.center().x {
+                    1.0
+                } else {
+                    -1.0
+                };
+                if self.player.take_damage(2, dir) {
+                    // Подброс вверх, чтобы игрок не застрял в шипах.
+                    self.player.vel.y = -430.0;
+                    self.particles.hit_spark(player_body.center(), dir);
+                    self.hitstop = self.hitstop.max(0.05);
+                }
+            }
+        }
+
+        // ---------- ЗОЛОТО И ЧЕКПОИНТЫ ----------
+        let player_body = self.player.body();
+        for coin in &mut self.coins {
+            if !coin.taken
+                && player_body
+                    .overlaps(&Aabb::new(coin.pos.x - 8.0, coin.pos.y - 8.0, 16.0, 16.0))
+            {
+                coin.taken = true;
+                self.gold += 1;
+                self.particles.hit_spark(coin.pos, 1.0);
+            }
+        }
+        for cp in &mut self.checkpoints {
+            if !cp.lit
+                && player_body
+                    .overlaps(&Aabb::new(cp.pos.x - 26.0, cp.pos.y - 64.0, 52.0, 64.0))
+            {
+                cp.lit = true;
+                self.respawn_point = Vec2::new(cp.pos.x - 10.0, cp.pos.y - 40.0);
+            }
+        }
+
         self.particles.update(FIXED_DT);
         self.time += FIXED_DT;
 
         // Падение в пустоту или смерть — возврат на чекпоинт с полным HP.
         if self.player.pos.y > VOID_Y || self.player.hp == 0 {
-            self.player.respawn(spawn_point());
+            self.player.respawn(self.respawn_point);
         }
     }
 
@@ -297,13 +475,18 @@ impl Game {
 
         draw_parallax(&self.cam_pos, &view, self.time);
         draw_tiles(&self.world, &self.cam_pos, &view);
-        draw_torches(self.time);
+        draw_decor(&self.decor, self.time);
+        draw_spikes(&self.spikes);
+        draw_checkpoints(&self.checkpoints, self.time);
+        draw_movers(&self.movers, self.time);
+        draw_torches(&self.torches, self.time);
         draw_motes(&self.cam_pos, &view, self.time);
         draw_enemies(&self.enemies, self.time);
         draw_player(&self.player, self.time);
         self.particles.draw();
 
         set_default_camera();
+        draw_vignette();
         self.draw_hud(frame_dt);
     }
 
@@ -321,6 +504,15 @@ impl Game {
         for (cx, cy) in [(10.0, 10.0), (318.0, 10.0), (10.0, 94.0), (318.0, 94.0)] {
             draw_rectangle(cx, cy, 4.0, 4.0, GOLD);
         }
+        // Филигрань: Г-образные уголки по внутреннему периметру.
+        draw_rectangle(10.0, 10.0, 16.0, 3.0, GOLD_DARK);
+        draw_rectangle(10.0, 10.0, 3.0, 16.0, GOLD_DARK);
+        draw_rectangle(298.0, 10.0, 16.0, 3.0, GOLD_DARK);
+        draw_rectangle(311.0, 10.0, 3.0, 16.0, GOLD_DARK);
+        draw_rectangle(10.0, 87.0, 16.0, 3.0, GOLD_DARK);
+        draw_rectangle(10.0, 74.0, 3.0, 16.0, GOLD_DARK);
+        draw_rectangle(298.0, 87.0, 16.0, 3.0, GOLD_DARK);
+        draw_rectangle(311.0, 74.0, 3.0, 16.0, GOLD_DARK);
 
         draw_text(
             &format!("FPS {:.0}", self.fps_smooth),
@@ -351,6 +543,22 @@ impl Game {
         for i in 0..self.player.max_hp {
             draw_heart(16.0 + i as f32 * 20.0, 68.0, i < self.player.hp);
         }
+        // Разделитель под сердцами.
+        draw_rectangle(16.0, 90.0, 96.0, 1.0, Color::new(0.30, 0.27, 0.24, 0.6));
+
+        // --- золото: монета + счётчик ---
+        let coin_x = 150.0;
+        draw_circle(coin_x + 5.0, 74.0, 6.5, OUTLINE);
+        draw_circle(coin_x + 5.0, 74.0, 5.5, GOLD);
+        draw_circle(coin_x + 3.5, 72.5, 1.8, Color::new(0.93, 0.83, 0.55, 1.0));
+        draw_rectangle(coin_x + 5.0, 69.5, 1.5, 9.0, Color::new(0.55, 0.42, 0.16, 1.0));
+        draw_text(
+            &format!("x {}", self.gold),
+            coin_x + 15.0,
+            79.0,
+            20.0,
+            TEXT_MAIN,
+        );
         // Шрифт по умолчанию в macroquad — только ASCII, поэтому HUD на латинице.
         draw_text(
             "A/D - move   SPACE - jump   SHIFT - dash   J/Z - attack",
@@ -361,80 +569,28 @@ impl Game {
         );
         draw_text(
             "VOXEL KNIGHT",
+            13.0,
+            screen_height() - 53.0,
+            22.0,
+            Color::new(0.03, 0.025, 0.02, 0.9),
+        );
+        draw_text(
+            "VOXEL KNIGHT",
             12.0,
             screen_height() - 54.0,
             22.0,
             TEXT_MAIN,
         );
+        // Золотая черта с ромбом под титулом.
+        let uy = screen_height() - 50.0;
+        draw_rectangle(12.0, uy, 128.0, 2.0, GOLD_DARK);
+        draw_rectangle(12.0 + 64.0 - 3.0, uy - 1.5, 6.0, 4.0, GOLD);
     }
 }
 
 // ---------------------------------------------------------------------------
 // Уровень
 // ---------------------------------------------------------------------------
-
-/// Заполнить блок тайлов (один прямоугольник вместо сотни — быстрый broad-phase).
-fn fill(world: &mut World, tx: i32, ty: i32, w: i32, h: i32) {
-    world.add_solid(Aabb::new(
-        tx as f32 * TILE,
-        ty as f32 * TILE,
-        w as f32 * TILE,
-        h as f32 * TILE,
-    ));
-}
-
-/// Готовый уровень: геометрия, точка спавна игрока и расстановка врагов.
-struct Level {
-    world: World,
-    spawn: Vec2,
-    enemy_spawns: Vec<(EnemyKind, Vec2)>,
-}
-
-/// Демо-уровень ядра: пол с ямой (Coyote Time), платформы, стена для
-/// Wall Slide и первые враги (FSM). Генерация уровней (TMX/JSON)
-/// подключается отдельным модулем.
-fn build_level() -> Level {
-    let mut world = World::new();
-
-    // Пол слева от ямы и справа.
-    fill(&mut world, -8, 14, 28, 2);
-    fill(&mut world, 23, 14, 41, 2);
-    // Дно ямы:2 ряда глубиной — из неё можно выпрыгнуть.
-    fill(&mut world, 20, 16, 3, 2);
-
-    // Платформы (подъём по 64 px — в пределах высоты прыжка ~85 px).
-    fill(&mut world, 6, 12, 5, 1);
-    fill(&mut world, 13, 10, 4, 1);
-    fill(&mut world, 40, 12, 6, 1);
-
-    // Высокая стена для Wall Slide / Wall Jump.
-    fill(&mut world, 28, 7, 1, 7);
-
-    // Границы уровня.
-    fill(&mut world, -8, 6, 1, 8);
-    fill(&mut world, 60, 6, 4, 8);
-
-    // Расстановка врагов (левый верхний угол хитбокса):
-    // два слизня на полу, летучая мышь над ямой, культист на платформе,
-    // скелет и некрорыцарь-босс у правой стены.
-    let floor_top = 14.0 * TILE;
-    let enemy_spawns = vec![
-        (EnemyKind::Slime, Vec2::new(10.0 * TILE, floor_top - 20.0)),
-        (EnemyKind::Slime, Vec2::new(36.0 * TILE, floor_top - 20.0)),
-        (EnemyKind::Skeleton, Vec2::new(44.0 * TILE, floor_top - 38.0)),
-        (EnemyKind::Bat, Vec2::new(21.5 * TILE, 9.0 * TILE)),
-        // Культист держит среднюю дистанцию на верхней платформе (y = 10*TILE).
-        (EnemyKind::Cultist, Vec2::new(14.0 * TILE, 10.0 * TILE - 34.0)),
-        // Босс — «босс-арена» у правой границы уровня.
-        (EnemyKind::DeathKnight, Vec2::new(52.0 * TILE, floor_top - 56.0)),
-    ];
-
-    Level {
-        world,
-        spawn: spawn_point(),
-        enemy_spawns,
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Отрисовка
@@ -493,18 +649,77 @@ fn draw_parallax(cam: &Vec2, view: &Vec2, time: f32) {
                 1.5,
                 Color::new(0.85, 0.82, 0.74, 0.20 + 0.35 * tw),
             );
+            if n2 > 0.72 {
+                // Яркая звезда: крест лучей, пульсирует вместе с ядром.
+                draw_rectangle(
+                    sx - 2.5,
+                    sy + 0.25,
+                    6.0,
+                    1.0,
+                    Color::new(0.85, 0.82, 0.74, 0.10 + 0.20 * tw),
+                );
+                draw_rectangle(
+                    sx + 0.25,
+                    sy - 2.5,
+                    1.0,
+                    6.0,
+                    Color::new(0.85, 0.82, 0.74, 0.10 + 0.20 * tw),
+                );
+            }
         }
     }
 
     // --- луна: тусклый диск с кратерами и тёплым ореолом ---
     let moon_x = cam.x * 0.94 + 420.0;
     let moon_y = top + 52.0;
+    draw_circle(moon_x, moon_y, 52.0, Color::new(0.85, 0.75, 0.55, 0.018));
     draw_circle(moon_x, moon_y, 30.0, Color::new(0.85, 0.75, 0.55, 0.035));
     draw_circle(moon_x, moon_y, 17.0, Color::new(0.85, 0.78, 0.60, 0.06));
     draw_circle(moon_x, moon_y, 10.5, Color::new(0.78, 0.75, 0.66, 0.85));
     draw_circle(moon_x - 3.0, moon_y - 2.0, 2.6, Color::new(0.62, 0.60, 0.54, 0.55));
     draw_circle(moon_x + 3.5, moon_y + 3.0, 1.8, Color::new(0.64, 0.62, 0.56, 0.5));
     draw_circle(moon_x + 1.5, moon_y - 4.5, 1.2, Color::new(0.63, 0.61, 0.55, 0.45));
+
+    // --- дрейфующие облака: четыре тёмных пласта, параллакс по слоям ---
+    for i in 0..4 {
+        let speed = 0.30 + i as f32 * 0.10;
+        let drift = time * (3.0 + i as f32 * 1.7);
+        let span = 240.0 + i as f32 * 60.0;
+        let shift = cam.x * (1.0 - speed) - drift;
+        let cy = top + 36.0 + i as f32 * 30.0;
+        let k0 = (((left - shift) / span).floor()) as i32 - 1;
+        let k1 = (((left + view.x - shift) / span).ceil()) as i32 + 1;
+        for k in k0..=k1 {
+            let n = hash_noise(k * 197 + i * 31 + 7);
+            if n < -0.4 {
+                continue;
+            }
+            let x = k as f32 * span + shift;
+            let wcl = 90.0 + (n + 1.0) * 60.0;
+            draw_rectangle(x, cy, wcl, 9.0 + i as f32 * 2.0, Color::new(0.055, 0.048, 0.045, 0.26));
+            draw_rectangle(x + wcl * 0.2, cy - 5.0, wcl * 0.5, 6.0, Color::new(0.055, 0.048, 0.045, 0.20));
+        }
+    }
+
+    // --- дальний план: еле различимый хребет за основным ---
+    {
+        let speed = 0.06;
+        let color = Color::new(0.070, 0.059, 0.053, 1.0);
+        let span = 320.0;
+        let shift = cam.x * (1.0 - speed);
+        let k_start = (((left - shift) / span).floor()) as i32 - 1;
+        let k_end = (((left + view.x - shift) / span).ceil()) as i32 + 1;
+        for k in k_start..=k_end {
+            let x = k as f32 * span + shift;
+            let col_w = 20.0;
+            let cols = (span / col_w) as i32 + 1;
+            for c in 0..cols {
+                let n = hash_noise(k * 311 + c * 37 + 1);
+                let h = 40.0 + (n + 1.0) * 0.5 * 70.0;
+                draw_rectangle(x + c as f32 * col_w, HORIZON - h, col_w + 1.0, h, color);
+            }
+        }
+    }
 
     // --- дальний слой: горный хребет с руинами замка ---
     {
@@ -560,6 +775,10 @@ fn draw_parallax(cam: &Vec2, view: &Vec2, time: f32) {
                     11.0,
                     Color::new(0.72, 0.48, 0.20, 0.5),
                 );
+                // Врата-арка у подножия + знамя на башне.
+                draw_rectangle(tower_x + 40.0, HORIZON - 26.0, 18.0, 26.0, Color::new(0.05, 0.04, 0.035, 1.0));
+                draw_rectangle(tower_x + 46.0, HORIZON - 32.0, 6.0, 6.0, Color::new(0.05, 0.04, 0.035, 1.0));
+                draw_rectangle(tower_x + 22.0, HORIZON - tower_h + 12.0, 4.0, 16.0, Color::new(0.30, 0.14, 0.12, 0.75));
                 if m > 0.6 {
                     draw_rectangle(
                         tower_x + 12.0,
@@ -599,6 +818,14 @@ fn draw_parallax(cam: &Vec2, view: &Vec2, time: f32) {
                 draw_rectangle(tx - 13.0, HORIZON - th + 1.0, 4.0, 7.0, tree_color);
                 draw_rectangle(tx + 3.0, HORIZON - th + 13.0, 10.0, 4.0, tree_color);
                 draw_rectangle(tx + 11.0, HORIZON - th + 8.0, 4.0, 7.0, tree_color);
+                // Светлячки у подножия: тёплые мигающие точки.
+                for f in 0..2 {
+                    let fxp = tx + 14.0 + f as f32 * 18.0
+                        + (time * 0.7 + f as f32 * 2.0).sin() * 10.0;
+                    let fyp = HORIZON - 14.0 - (time * 0.9 + f as f32).cos() * 8.0;
+                    let fa = 0.25 + 0.35 * (time * 2.2 + f as f32 * 3.1).sin().abs();
+                    draw_rectangle(fxp, fyp, 2.0, 2.0, Color::new(0.93, 0.78, 0.42, fa));
+                }
             }
         }
     }
@@ -790,6 +1017,12 @@ fn draw_tiles(world: &World, cam: &Vec2, view: &Vec2) {
                         let px = 3.0 + ((hash_noise(seed + 60 + i) + 1.0) * 0.5) * (TILE - 8.0);
                         draw_rectangle(x + px, y + moss_h + 4.0, 2.0, 2.0, STONE_HI);
                     }
+                    // Травинки, пробившиеся сквозь мох.
+                    for i in 0..2 {
+                        let gx = 4.0 + ((hash_noise(seed + 71 + i) + 1.0) * 0.5) * (TILE - 10.0);
+                        let gh = 3.0 + ((hash_noise(seed + 75 + i) + 1.0) * 0.5) * 3.0;
+                        draw_rectangle(x + gx, y - gh, 1.5, gh, MOSS_HI);
+                    }
                 }
 
                 // --- трещины и сколы ---
@@ -812,6 +1045,35 @@ fn draw_tiles(world: &World, cam: &Vec2, view: &Vec2) {
                     let cy = if corner > 1 { y + 2.0 } else { y + TILE - 8.0 };
                     draw_rectangle(cx, cy, 6.0, 6.0, STONE_LO);
                     draw_rectangle(cx + 1.0, cy + 1.0, 3.0, 3.0, STONE[0]);
+                }
+
+                // --- детали ×2: блики-сколы, следы боёв, череп в кладке ---
+                let chips = 1 + ((hash_noise(seed + 91) + 1.0) as i32);
+                for c in 0..chips {
+                    let px = x + 3.0 + ((hash_noise(seed + 93 + c * 5) + 1.0) * 0.5) * (TILE - 8.0);
+                    let py = y + 4.0 + ((hash_noise(seed + 97 + c * 5) + 1.0) * 0.5) * (TILE - 10.0);
+                    draw_rectangle(px, py, 1.5, 1.5, STONE_HI);
+                }
+                // Зарубки от мечей — ржавые диагонали.
+                if hash_noise(seed + 77) > 0.86 {
+                    for s in 0..3 {
+                        draw_rectangle(x + 8.0 + s as f32 * 3.0, y + 8.0 + s as f32 * 3.5, 2.0, 2.0, RUST_W);
+                    }
+                    draw_rectangle(x + 7.0, y + 16.0, 3.0, 1.5, RUST_W);
+                }
+                // Встроенный в кладку череп (редко, не на верхних гранях).
+                if hash_noise(seed + 81) > 0.92 && !open_above {
+                    draw_rectangle(x + 11.0, y + 15.0, 10.0, 8.0, BONE);
+                    draw_rectangle(x + 13.0, y + 17.0, 2.5, 3.0, VISOR);
+                    draw_rectangle(x + 17.0, y + 17.0, 2.5, 3.0, VISOR);
+                    draw_rectangle(x + 12.0, y + 23.0, 8.0, 2.0, Color::new(0.55, 0.52, 0.44, 1.0));
+                }
+                // AO: тень во внутренних углах стыков.
+                if open_above && open_left {
+                    draw_rectangle(x, y, 2.0, 2.0, STONE_LO);
+                }
+                if open_above && open_right {
+                    draw_rectangle(x + TILE - 2.0, y, 2.0, 2.0, STONE_LO);
                 }
 
                 // Чёткий шов по периметру — пиксельная сетка.
@@ -889,27 +1151,43 @@ fn draw_motes(cam: &Vec2, view: &Vec2, time: f32) {
         let size = if warm { 2.0 } else { 1.5 };
         draw_rectangle(px, py, size, size, c);
     }
+
+    // --- падающие листья: медленный зигзаг с «порханием» ---
+    for i in 0..5 {
+        let h1 = hash_noise(i * 53 + 21);
+        let h2 = hash_noise(i * 77 + 33);
+        let speed = 14.0 + (h1 + 1.0) * 8.0;
+        let span_x = view.x + 80.0;
+        let span_y = view.y + 80.0;
+        let px = cam.x - view.x * 0.5 - 40.0
+            + (((h1 + 1.0) * 0.5 * span_x
+                + (time * (7.0 + h2 * 3.0)).sin() * 26.0
+                + time * 4.0)
+                .rem_euclid(span_x));
+        let py = cam.y - view.y * 0.5 - 40.0
+            + (((h2 + 1.0) * 0.5 * span_y + time * speed).rem_euclid(span_y));
+        let flutter = (time * 6.0 + i as f32 * 2.1).sin();
+        let c = if i % 2 == 0 { MOSS } else { DIRT };
+        if flutter > 0.0 {
+            draw_rectangle(px, py, 4.0, 2.0, Color::new(c.r, c.g, c.b, 0.55));
+        } else {
+            draw_rectangle(px + 1.0, py - 1.0, 2.0, 4.0, Color::new(c.r, c.g, c.b, 0.55));
+        }
+    }
 }
 
 /// Факелы: железный держатель, живой огонь и мягкий тёплый свет.
-fn draw_torches(time: f32) {
-    // Каждый факел висит на вертикальной грани блока (см. build_level).
-    const TORCHES: [(f32, f32); 6] = [
-        (28.0 * TILE - 6.0, 7.5 * TILE),  // стена wall-slide, верх
-        (28.0 * TILE - 6.0, 12.0 * TILE), // стена wall-slide, низ
-        (60.0 * TILE - 6.0, 8.0 * TILE),  // правая граница
-        (-7.0 * TILE, 7.0 * TILE),        // левая граница
-        (6.0 * TILE - 6.0, 12.5 * TILE),  // платформа
-        (20.0 * TILE, 14.75 * TILE),      // стенка ямы
-    ];
-
-    for (i, (x, y)) in TORCHES.into_iter().enumerate() {
+fn draw_torches(torches: &[(f32, f32)], time: f32) {
+    // Каждый факел висит на вертикальной грани блока (позиции из level1.json).
+    for (i, (x, y)) in torches.iter().enumerate() {
+        let (x, y) = (*x, *y);
         let flicker = hash_noise(i as i32 * 17 + (time * 8.0) as i32);
         let flick2 = hash_noise(i as i32 * 31 + (time * 13.0 + 4.0) as i32);
         let pulse = 1.0 + flicker * 0.14;
         let lean = flick2 * 2.0; // язык пламя косит в сторону
 
-        // --- мягкий тёплый свет: три кольца + пятно на полу ---
+        // --- мягкий тёплый свет: четыре кольца + пятно на полу ---
+        draw_circle(x + 3.0, y - 6.0, 96.0 * pulse, Color::new(0.851, 0.643, 0.255, 0.018));
         draw_circle(x + 3.0, y - 6.0, 64.0 * pulse, Color::new(0.851, 0.643, 0.255, 0.030));
         draw_circle(x + 3.0, y - 6.0, 40.0 * pulse, Color::new(0.851, 0.643, 0.255, 0.055));
         draw_circle(x + 3.0, y - 4.0, 22.0 * pulse, Color::new(0.906, 0.706, 0.318, 0.095));
@@ -972,7 +1250,230 @@ fn draw_torches(time: f32) {
             let es = if phase < 0.4 { 2.0 } else { 1.5 };
             draw_rectangle(ex, ey, es, es, Color::new(EMBER.r, EMBER.g, EMBER.b, ea));
         }
+
+        // --- дымок над пламенем: два полупрозрачных клубка ---
+        for s in 0..2 {
+            let phase = (time * (0.5 + s as f32 * 0.23) + i as f32 * 0.4).rem_euclid(1.0);
+            let sxp = x + 3.5
+                + (time * (6.0 + s as f32 * 4.0) + i as f32 * 30.0).sin() * (6.0 + s as f32 * 4.0);
+            let syp = y - 14.0 - phase * 46.0;
+            let sa = (1.0 - phase) * 0.16;
+            let ss = 3.0 + phase * 5.0;
+            draw_rectangle(sxp, syp, ss, ss, Color::new(0.38, 0.36, 0.33, sa));
+        }
+
+        // --- подвесной крюк над держателем ---
+        draw_rectangle(x + 2.0, y - 14.0, 2.0, 5.0, STEEL_DARK);
+        draw_rectangle(x + 1.0, y - 16.0, 4.0, 2.0, IRON);
     }
+}
+
+/// Декор уровня: лианы, цепи, черепа, знамёна и щебень (из level1.json).
+fn draw_decor(decor: &[(i32, i32, crate::level::Decor)], time: f32) {
+    for (tx, ty, kind) in decor {
+        let x = *tx as f32 * TILE;
+        let y = *ty as f32 * TILE;
+        let seed = tx * 73 + ty * 131;
+        match kind {
+            crate::level::Decor::Vine => {
+                // Три свисающих плети с листиками, качаются от ветра.
+                for i in 0..3 {
+                    let vx = x + 4.0 + i as f32 * 9.0;
+                    let len = 14.0 + ((hash_noise(seed + i * 7) + 1.0) * 0.5) * 14.0;
+                    let sway = (time * 1.6 + i as f32 + seed as f32 * 0.1).sin() * 2.0;
+                    draw_rectangle(vx + sway * 0.4, y + TILE - 2.0, 2.0, len * 0.5, MOSS);
+                    draw_rectangle(
+                        vx + sway,
+                        y + TILE - 2.0 + len * 0.5,
+                        2.0,
+                        len * 0.5,
+                        MOSS_LO,
+                    );
+                    draw_rectangle(vx - 1.0 + sway, y + TILE + len - 4.0, 4.0, 2.0, MOSS_HI);
+                }
+            }
+            crate::level::Decor::Chain => {
+                // Цепь: звенья-прямоугольники вниз, чередование широких/узких.
+                for l in 0..5 {
+                    let cy = y + 2.0 + l as f32 * 6.0;
+                    let link = if l % 2 == 0 { 5.0 } else { 3.0 };
+                    draw_rectangle(x + 16.0 - link * 0.5, cy, link, 4.0, STEEL_DARK);
+                    draw_rectangle(x + 16.0 - link * 0.5, cy, link, 1.0, STEEL_HI);
+                }
+            }
+            crate::level::Decor::Skull => {
+                // Череп на земле: свод, челюсть, глазницы, зубы.
+                let sy = y + TILE - 12.0;
+                draw_rectangle(x + 11.0, sy, 10.0, 8.0, BONE);
+                draw_rectangle(x + 12.0, sy + 8.0, 8.0, 3.0, BONE);
+                draw_rectangle(x + 13.0, sy + 2.0, 2.5, 3.0, VISOR);
+                draw_rectangle(x + 17.0, sy + 2.0, 2.5, 3.0, VISOR);
+                draw_rectangle(x + 14.0, sy + 9.0, 1.0, 2.0, STONE_DARK);
+                draw_rectangle(x + 17.0, sy + 9.0, 1.0, 2.0, STONE_DARK);
+                // Трещина на своде.
+                draw_rectangle(x + 18.5, sy + 1.0, 1.0, 3.0, STONE_LO);
+            }
+            crate::level::Decor::Banner => {
+                // Знамя: полотнище с гербом, нижний край рваный, колышется.
+                let sway = (time * 1.2 + seed as f32 * 0.3).sin() * 1.5;
+                draw_rectangle(x + 10.0, y, 12.0, 34.0, CLOAK);
+                draw_rectangle(x + 10.0, y, 12.0, 3.0, CLOAK_DARK);
+                draw_rectangle(x + 10.0 + sway * 0.5, y + 34.0, 12.0, 4.0, CLOAK_DARK);
+                draw_rectangle(x + 10.0, y, 2.0, 34.0, CLOAK_DARK);
+                // Герб-ромб.
+                draw_rectangle(x + 14.5, y + 12.0, 3.0, 8.0, GOLD);
+                draw_rectangle(x + 13.0, y + 14.0, 6.0, 4.0, GOLD);
+                // Крепёжная перекладина.
+                draw_rectangle(x + 9.0, y - 2.0, 14.0, 2.0, IRON);
+                draw_rectangle(x + 9.0, y - 2.0, 14.0, 1.0, STEEL_HI);
+            }
+            crate::level::Decor::Rubble => {
+                // Щебень: камни разных размеров + обломок кости.
+                draw_rectangle(x + 5.0, y + TILE - 7.0, 8.0, 5.0, STONE_DARK);
+                draw_rectangle(x + 15.0, y + TILE - 5.0, 6.0, 3.0, STONE_LO);
+                draw_rectangle(x + 8.0, y + TILE - 10.0, 5.0, 4.0, STONE_HI);
+                draw_rectangle(x + 20.0, y + TILE - 9.0, 4.0, 2.0, BONE);
+            }
+        }
+    }
+}
+
+/// Шипы: ряды костяных пик с каменным основанием (по 16 px на пик).
+fn draw_spikes(spike_rects: &[Aabb]) {
+    for r in spike_rects {
+        let segs = (r.size.x / 16.0).floor() as i32;
+        let base_y = r.pos.y + r.size.y;
+        for s in 0..segs {
+            let sx = r.pos.x + s as f32 * 16.0;
+            // Основание.
+            draw_rectangle(sx, base_y - 4.0, 16.0, 4.0, STONE_DARK);
+            draw_rectangle(sx, base_y - 4.0, 16.0, 1.0, STONE_HI);
+            // Пика ступенями: 12 → 8 → 4 px.
+            draw_rectangle(sx + 3.0, base_y - 14.0, 10.0, 10.0, BONE);
+            draw_rectangle(sx + 5.0, base_y - 18.0, 6.0, 5.0, BONE);
+            draw_rectangle(sx + 7.0, base_y - 21.0, 2.0, 4.0, BONE);
+            // Тень слева, световая кромка справа.
+            draw_rectangle(sx + 3.0, base_y - 14.0, 2.0, 10.0, Color::new(0.52, 0.48, 0.40, 1.0));
+            draw_rectangle(
+                sx + 9.5,
+                base_y - 17.0,
+                1.5,
+                13.0,
+                Color::new(0.90, 0.87, 0.78, 1.0),
+            );
+        }
+    }
+}
+
+/// Чекпоинт-фонарь: железная стойка; зажжённый мягко освещает округу.
+fn draw_checkpoints(checkpoints: &[Checkpoint], time: f32) {
+    for cp in checkpoints {
+        let x = cp.pos.x;
+        let y = cp.pos.y;
+        let flicker = 0.9 + (hash_noise((time * 9.0) as i32 + 3) * 0.5 + 0.5) * 0.2;
+        // Основание и стойка.
+        draw_rectangle(x - 8.0, y - 3.0, 16.0, 3.0, STONE_DARK);
+        draw_rectangle(x - 2.0, y - 34.0, 4.0, 31.0, IRON);
+        draw_rectangle(x - 2.0, y - 34.0, 1.5, 31.0, STEEL_DARK);
+        draw_rectangle(x - 1.0, y - 38.0, 2.0, 4.0, IRON);
+        // Кронштейн и корпус фонаря.
+        draw_rectangle(x + 2.0, y - 36.0, 6.0, 3.0, IRON);
+        let lx = x + 3.0;
+        let ly = y - 33.0;
+        draw_rectangle(lx - 1.0, ly - 1.0, 12.0, 16.0, IRON);
+        draw_rectangle(
+            lx,
+            ly,
+            10.0,
+            14.0,
+            if cp.lit {
+                FLAME
+            } else {
+                Color::new(0.10, 0.09, 0.08, 1.0)
+            },
+        );
+        // Крыша с бликом.
+        draw_rectangle(lx - 2.0, ly - 3.0, 14.0, 3.0, IRON);
+        draw_rectangle(lx - 2.0, ly - 3.0, 14.0, 1.0, STEEL_HI);
+        if cp.lit {
+            // Огонёк внутри + два кольца тёплого света.
+            draw_rectangle(lx + 2.0, ly + 5.0, 6.0, 7.0, FLAME);
+            draw_rectangle(lx + 3.5, ly + 7.0, 3.0, 5.0, FLAME_CORE);
+            draw_circle(
+                lx + 5.0,
+                ly + 6.0,
+                30.0 * flicker,
+                Color::new(0.906, 0.706, 0.318, 0.08),
+            );
+            draw_circle(
+                lx + 5.0,
+                ly + 6.0,
+                54.0 * flicker,
+                Color::new(0.851, 0.643, 0.255, 0.045),
+            );
+        }
+    }
+}
+
+/// Движущиеся платформы: древние плиты с пульсирующей руной и скобами.
+fn draw_movers(movers: &[Mover], time: f32) {
+    for m in movers {
+        let r = m.rect();
+        let x = r.pos.x;
+        let y = r.pos.y;
+        let w = r.size.x;
+        let h = r.size.y;
+        // Плита с каменной кладкой.
+        draw_rectangle(x, y, w, h, STONE_DARK);
+        draw_rectangle(x, y, w, h - 3.0, STONE[1]);
+        draw_rectangle(x, y, w, 2.0, STONE_HI);
+        draw_rectangle(x, y + h - 4.0, w, 2.0, STONE_LO);
+        draw_rectangle(x + w * 0.33, y + 2.0, 1.0, h - 5.0, STONE_DARK);
+        draw_rectangle(x + w * 0.66, y + 2.0, 1.0, h - 5.0, STONE_DARK);
+        // Железные скобы по краям.
+        draw_rectangle(x - 2.0, y + 2.0, 4.0, h - 5.0, IRON);
+        draw_rectangle(x + w - 2.0, y + 2.0, 4.0, h - 5.0, IRON);
+        draw_rectangle(x - 2.0, y + 2.0, 4.0, 2.0, STEEL_HI);
+        draw_rectangle(x + w - 2.0, y + 2.0, 4.0, 2.0, STEEL_HI);
+        // Руна по центру — тёплый пульс.
+        let pulse = 0.55 + 0.45 * (time * 2.2 + m.phase).sin();
+        draw_rectangle(
+            x + w * 0.5 - 4.0,
+            y + h * 0.5 - 3.0,
+            8.0,
+            6.0,
+            Color::new(0.851, 0.643, 0.255, 0.35 + 0.4 * pulse),
+        );
+        draw_rectangle(
+            x + w * 0.5 - 1.0,
+            y + h * 0.5 - 5.0,
+            2.0,
+            10.0,
+            Color::new(0.957, 0.839, 0.541, 0.3 + 0.5 * pulse),
+        );
+        // Свисающие звенья под плитой.
+        for l in 0..3 {
+            let lx = x + 6.0 + l as f32 * (w - 12.0) * 0.5;
+            let sway = (time * 2.0 + l as f32).sin() * 1.5;
+            draw_rectangle(lx + sway, y + h, 2.5, 5.0 + l as f32 * 2.0, STEEL_DARK);
+        }
+    }
+}
+
+/// Виньетка: затемнение краёв экрана поверх мира (screen-space).
+fn draw_vignette() {
+    let w = screen_width();
+    let h = screen_height();
+    let edge = Color::new(0.0, 0.0, 0.0, 0.16);
+    let deep = Color::new(0.0, 0.0, 0.0, 0.22);
+    draw_rectangle(0.0, 0.0, w, 14.0, deep);
+    draw_rectangle(0.0, 14.0, w, 16.0, edge);
+    draw_rectangle(0.0, h - 14.0, w, 14.0, deep);
+    draw_rectangle(0.0, h - 30.0, w, 16.0, edge);
+    draw_rectangle(0.0, 0.0, 14.0, h, deep);
+    draw_rectangle(14.0, 0.0, 16.0, h, edge);
+    draw_rectangle(w - 14.0, 0.0, 14.0, h, deep);
+    draw_rectangle(w - 30.0, 0.0, 16.0, h, edge);
 }
 
 /// Рыцарь: послойная пиксельная отрисовка — обводка силуэта, бевели
@@ -1080,12 +1581,20 @@ fn draw_player(p: &Player, time: f32) {
     part(10.0 + sway * 0.4, 12.0, 3.0, cloak_h - 1.0, CLOAK);
     // Открытый край ткани.
     draw_rectangle(fx(2.0 + sway, 4.0), top + 12.0, 1.0, cloak_h, Color::new(0.62, 0.32, 0.26, 1.0));
+    // Рваные клочья по нижнему краю плаща.
+    let hem = top + 12.0 + cloak_h;
+    draw_rectangle(fx(2.0 + sway, 3.0), hem - 2.0, 2.0, 4.0, CLOAK_DARK);
+    draw_rectangle(fx(9.0 + sway * 0.5, 3.0), hem - 3.0, 2.0, 5.0, CLOAK_DARK);
 
     // --- ножны меча за спиной (набалдашник над плечом) ---
     part(18.0, 3.0, 4.0, 24.0, LEATHER);
     draw_rectangle(fx(18.0, 4.0), top + 3.0, 4.0, 2.0, STEEL_DARK);
     draw_rectangle(fx(19.0, 2.0), top - 1.0, 2.0, 4.0, GOLD);
     draw_rectangle(fx(18.0, 4.0), top + 25.0, 4.0, 3.0, STEEL_DARK);
+    // Блик, изредка пробегающий по ножнам.
+    if (time * 1.4).sin() > 0.88 {
+        draw_rectangle(fx(18.0, 4.0), top + 9.0, 4.0, 3.0, STEEL_HI);
+    }
 
     // --- ноги: бедро, наколенник, голень, сапог с подошвой ---
     let leg_y = top + h - 16.0;
@@ -1113,8 +1622,9 @@ fn draw_player(p: &Player, time: f32) {
         part(lx, ly + 7.0, 6.0, 4.0, STEEL_DARK);
         part(lx, ly + 10.0, 7.0, 5.0, LEATHER);
         draw_rectangle(fx(lx, 7.0), ly + 14.0, 7.0, 1.0, OUTLINE);
-        // Заклёпка на сапоге.
+        // Заклёпка на сапоге + шпора на каблуке.
         draw_rectangle(fx(lx + 1.0, 2.0), ly + 11.0, 2.0, 2.0, GOLD);
+        draw_rectangle(fx(lx - 1.0, 2.0), ly + 12.0, 2.0, 2.0, STEEL_HI);
     };
     leg(leg1, if p.state == PlayerState::Run { leg_lift } else { 0.0 });
     leg(leg2, if p.state == PlayerState::Run { leg_lift * 0.5 } else { 0.0 });
@@ -1132,6 +1642,17 @@ fn draw_player(p: &Player, time: f32) {
     part(tl, 23.0, 16.0, 3.0, LEATHER);
     draw_rectangle(fx(tl + 6.0, 4.0), top + 23.0, 4.0, 3.0, GOLD);
     draw_rectangle(fx(tl + 7.0, 2.0), top + 24.0, 2.0, 1.0, CLOAK_DARK);
+
+    // --- подсумок на поясе с золотой пуговицей ---
+    part(tl + 9.0, 25.0, 6.0, 5.0, LEATHER);
+    draw_rectangle(
+        fx(tl + 10.0, 4.0),
+        top + 25.0,
+        4.0,
+        1.0,
+        Color::new(0.22, 0.155, 0.105, 1.0),
+    );
+    draw_rectangle(fx(tl + 11.0, 2.0), top + 27.0, 2.0, 2.0, GOLD);
 
     // --- наплечники (два яруса) ---
     bevel(tl - 2.0, 11.0, 7.0, 5.0, STEEL, STEEL_HI, STEEL_DARK);

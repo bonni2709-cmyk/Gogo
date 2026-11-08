@@ -170,4 +170,28 @@ pub(super) fn draw(t: &Transform, brain: &EnemyBrain, health: &Health, time: f32
         draw_rectangle(f1, fang_y, 2.0, 2.0, palette::BONE);
         draw_rectangle(f2, fang_y, 2.0, 2.0, palette::BONE);
     }
+
+    // Пальцы перепонок: тёмные линии по крылу.
+    for f in 0..2 {
+        let fxp = if t.facing >= 0.0 {
+            x + w - 4.0 - f as f32 * 6.0
+        } else {
+            x + 3.0 + f as f32 * 6.0
+        };
+        draw_rectangle(
+            fxp,
+            y + 5.0,
+            1.0,
+            6.0 + f as f32 * 3.0,
+            Color::new(0.09, 0.075, 0.065, 0.85),
+        );
+    }
+    // Внутренняя часть ушей.
+    draw_rectangle(x + w * 0.30, y + 1.0, 1.5, 3.0, palette::TATTER);
+    draw_rectangle(x + w * 0.60, y + 1.0, 1.5, 3.0, palette::TATTER);
+    // Тлеющий след за глазами в охоте.
+    if brain.state == EnemyState::Chase {
+        let trail_x = if t.facing >= 0.0 { x + w } else { x - 2.0 };
+        draw_rectangle(trail_x, eye_y + 0.5, 1.5, 1.5, Color::new(0.72, 0.46, 0.18, 0.45));
+    }
 }

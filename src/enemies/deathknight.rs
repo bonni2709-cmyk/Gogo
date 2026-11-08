@@ -245,6 +245,37 @@ pub(super) fn draw(t: &Transform, brain: &EnemyBrain, health: &Health, time: f32
         draw_rectangle(fx(hl + 5.0 + ti as f32 * 4.0, 2.0), y + 13.0, 2.0, 3.0, palette::SOCKET);
     }
 
+    // Меховая горжетка на плечах.
+    draw_rectangle(fx(2.0, 12.0), y + 20.0, 12.0, 3.0, bone);
+    draw_rectangle(fx(w - 14.0, 12.0), y + 20.0, 12.0, 3.0, bone);
+    draw_rectangle(fx(4.0, 8.0), y + 23.0, 8.0, 2.0, bone_dark);
+    draw_rectangle(fx(w - 12.0, 8.0), y + 23.0, 8.0, 2.0, bone_dark);
+    // Цепь через грудь с подвеской-реликвией.
+    draw_rectangle(fx(7.0, 26.0), y + 18.0, 26.0, 2.0, palette::STEEL_DARK);
+    for l in 0..4 {
+        draw_rectangle(fx(8.0 + l as f32 * 6.0, 3.0), y + 17.0, 3.0, 4.0, palette::STEEL);
+    }
+    draw_rectangle(fx(19.0, 5.0), y + 27.0, 5.0, 6.0, palette::GOLD);
+    draw_rectangle(fx(20.0, 3.0), y + 28.0, 3.0, 4.0, palette::RUST);
+    // Ярость: пульсирующая аура углей.
+    if brain.enraged {
+        let pulse = 0.5 + 0.5 * (time * 5.0).sin();
+        draw_rectangle(
+            x + 2.0,
+            y + h - 3.0,
+            w - 4.0,
+            2.0,
+            Color::new(0.90, 0.45, 0.15, 0.20 + 0.25 * pulse),
+        );
+        draw_rectangle(
+            x + 4.0,
+            y + 10.0,
+            w - 8.0,
+            1.5,
+            Color::new(0.90, 0.45, 0.15, 0.15 + 0.20 * pulse),
+        );
+    }
+
     // --- клеймор по фазе FSM ---
     let (sx, sy, sword_len, raised) = match brain.state {
         EnemyState::Windup => (w - 6.0, y + 26.0, 24.0, true),

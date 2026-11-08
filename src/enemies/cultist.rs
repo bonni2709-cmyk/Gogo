@@ -244,6 +244,21 @@ pub(super) fn draw(t: &Transform, brain: &EnemyBrain, health: &Health, time: f32
     // Значок культа на груди (маленький ржавый диск).
     draw_rectangle(fx(10.0, 4.0), y + 13.0, 4.0, 4.0, palette::RUST);
     draw_rectangle(fx(11.0, 2.0), y + 14.0, 2.0, 2.0, palette::OUTLINE);
+    // Тесьма по подолу рясы.
+    draw_rectangle(fx(3.0, 18.0), y + h - 4.0, 18.0, 1.5, palette::CULTIST_MASK);
+    // Тень под капюшоном.
+    draw_rectangle(fx(6.0, 12.0), y + 8.0, 12.0, 3.0, palette::CULTIST_DARK);
+    // Орбитальный уголёк: кружит вокруг культиста.
+    let oa = time * 2.4 + x * 0.05;
+    let ox = x + w * 0.5 + oa.sin() * (w * 0.75);
+    let oy = y + h * 0.45 + (oa * 1.7).cos() * 8.0;
+    draw_rectangle(
+        ox,
+        oy,
+        2.0,
+        2.0,
+        Color::new(0.90, 0.55, 0.20, 0.55 + 0.3 * (time * 3.0).sin()),
+    );
     // Обводка робы.
     draw_rectangle_lines(fx(3.0, 18.0), y + 9.0, 18.0, h - 10.0, 1.0, palette::OUTLINE);
 }
