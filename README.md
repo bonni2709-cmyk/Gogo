@@ -13,10 +13,11 @@
 | Модуль | Назначение |
 | --- | --- |
 | `src/physics.rs` | AABB-коллизии с разделением осей (X → Y), подшаги против туннелирования, гравитация, broad-phase-сетка, рейкасты |
-| `src/player.rs` | Контроллер: кривые разгона, Coyote Time, Jump Buffer, Variable Jump Height, Wall Slide / Wall Jump, Dash с i-frames, здоровье и i-frames урона |
+| `src/player.rs` | Контроллер: кривые разгона, Coyote Time, Jump Buffer, Variable Jump Height, Wall Slide / Wall Jump, Dash с i-frames, 3-х ударное комбо мечом, здоровье и i-frames урона |
 | `src/ecs/mod.rs` | Лёгкий ECS: сущности с поколениями, типизированные хранилища компонентов (Transform / Velocity / Health) |
 | `src/enemies/` | ИИ врагов на FSM поверх ECS: слизень (погоня + прыжок-выпад), летучая мышь (парение/охота), скелет-мечник (замах → выпад → откат); агро по дистанции и линии взгляда, разворот у обрывов, контактный урон |
-| `src/game.rs` | Главный цикл с фиксированным шагом 1/60, демо-уровень с врагами, камера, параллакс, факелы, HUD (сердца) |
+| `src/particles.rs` | Object pooling частиц: пул на 600 спрайтов без аллокаций в кадре, искры попаданий меча и пиксельный взрыв при смерти врага |
+| `src/game.rs` | Главный цикл с фиксированным шагом 1/60, демо-уровень с врагами, камера, параллакс, факелы, HUD (сердца), hitstop и управление частицами |
 | `src/lib.rs` | Точка входа игры и Android-символ `quad_main` |
 | `android/java/` | Java-glue miniquad (MainActivity + QuadNative), вендорен из upstream |
 | `.github/workflows/build.yml` | Сборка подписанного APK в CI |

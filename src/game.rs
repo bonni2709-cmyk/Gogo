@@ -7,7 +7,8 @@
 
 use macroquad::prelude::*;
 
-use crate::enemies::{draw_enemies, EnemyKind, EnemyWorld};
+use crate::enemies::{death_palette, draw_enemies, EnemyKind, EnemyWorld};
+use crate::particles::ParticlePool;
 use crate::physics::{Aabb, World, FIXED_DT};
 use crate::player::{Player, PlayerInput, PlayerState};
 
@@ -114,6 +115,18 @@ struct Game {
     /// чтобы пропущенные кадры не теряли нажатия.
     jump_edge: bool,
     dash_edge: bool,
+    /// Захваченный edge атаки (клавиша или мышь) до фиксированного шага.
+    attack_edge: bool,
+    /// Предыдущее состояние мыши — для edge-нажатия атаки.
+    attack_mouse_prev: bool,
+    // --- боёвка: частицы, hitstop, учёт попаданий свинга ---
+    particles: ParticlePool,
+    /// Заморозка мира на ударе (частицы продолжают лететь), с.
+    hitstop: f32,
+    /// Кому уже навредил текущий свинг.
+    swing_hits: Vec<crate::ecs::Entity>,
+    /// Номер свинга, обработанный в `swing_hits`.
+    last_swing: u32,
 }
 
 impl Game {
@@ -132,6 +145,12 @@ impl Game {
             fps_smooth: 60.0,
             jump_edge: false,
             dash_edge: false,
+            attack_edge: false,
+            attack_mouse_prev: false,
+            particles: ParticlePool::new(),
+            hitstop: 0.0,
+            swing_hits: Vec::new(),
+            last_swing: 0,
         }
     }
 
@@ -146,10 +165,28 @@ impl Game {
         if is_key_pressed(KeyCode::LeftShift) || is_key_pressed(KeyCode::X) {
             self.dash_edge = true;
         }
+        // Атака: J / Z с клавиатуры либо edge левой кнопки мыши.
+        if is_key_pressed(KeyCode::Z) || is_key_pressed(KeyCode::J) {
+            self.attack_edge = true;
+        }
+        let mouse_atk = is_mouse_button_down(MouseButton::Left);
+        if mouse_atk && !self.attack_mouse_prev {
+            self.attack_edge = true;
+        }
+        self.attack_mouse_prev = mouse_atk;
     }
 
     /// Один фиксированный шаг симуляции (1/60 с).
     fn fixed_update(&mut self) {
+        // HITSTOP: мир замирает на ударе, частицы продолжают лететь.
+        // Edge-нажатия при этом копятся и тратятся после разморозки.
+        if self.hitstop > 0.0 {
+            self.hitstop -= FIXED_DT;
+            self.particles.update(FIXED_DT);
+            self.time += FIXED_DT;
+            return;
+        }
+
         let mut move_x = 0.0;
         if is_key_down(KeyCode::A) || is_key_down(KeyCode::Left) {
             move_x -= 1.0;
@@ -165,16 +202,59 @@ impl Game {
             jump_pressed: self.jump_edge,
             jump_held,
             dash_pressed: self.dash_edge,
+            attack_pressed: self.attack_edge,
         };
         // Edge тратится первым же фиксированным шагом.
         self.jump_edge = false;
         self.dash_edge = false;
+        self.attack_edge = false;
 
         self.player.update(&input, &self.world, FIXED_DT);
 
-        // Шаг ИИ врагов; возвращаются контакты, задевшие игроку.
-        let hits = self.enemies.update(&self.world, &self.player, FIXED_DT);
-        for hit in hits {
+        // ---------- УДАРЫ МЕЧОМ: хитбокс активных кадров ----------
+        if self.player.is_attacking() && self.player.is_attack_active() {
+            if self.player.swing_id() != self.last_swing {
+                self.last_swing = self.player.swing_id();
+                self.swing_hits.clear();
+            }
+            if let Some(hitbox) = self.player.attack_hitbox() {
+                // Сначала собираем цели — иначе borrow врагов мешает урону.
+                let mut targets = Vec::new();
+                for (entity, _, _) in self.enemies.iter() {
+                    if !self.swing_hits.contains(&entity)
+                        && self.enemies.body(entity).overlaps(&hitbox)
+                    {
+                        targets.push(entity);
+                    }
+                }
+                let damage = self.player.attack_damage();
+                for entity in targets {
+                    self.swing_hits.push(entity);
+                    let center = self.enemies.body(entity).center();
+                    // Отброс врага — от игрока.
+                    let dir = if center.x >= self.player.body().center().x {
+                        1.0
+                    } else {
+                        -1.0
+                    };
+                    if self.enemies.damage(entity, damage, dir) {
+                        self.particles.hit_spark(center, dir);
+                        // Контрольный hitstop: тяжёлый свинг замирает дольше.
+                        self.hitstop = if damage >= 2 { 0.08 } else { 0.05 };
+                    }
+                }
+            }
+        }
+
+        // ---------- ШАГ ВРАГОВ: смерть взрывается пикселями ----------
+        let step = self.enemies.update(&self.world, &self.player, FIXED_DT);
+        for (pos, kind) in step.deaths {
+            self.particles.death_burst(pos, death_palette(kind));
+            self.hitstop = self.hitstop.max(0.05);
+        }
+
+        // Контактные попадания врагов в игрока (у игрока свои i-frames).
+        for hit in step.contacts {
             let player_center = self.player.body().center();
             let knock_dir = if hit.center.x >= player_center.x {
                 -1.0
@@ -184,6 +264,7 @@ impl Game {
             self.player.take_damage(hit.damage, knock_dir);
         }
 
+        self.particles.update(FIXED_DT);
         self.time += FIXED_DT;
 
         // Падение в пустоту или смерть — возврат на чекпоинт с полным HP.
@@ -220,6 +301,7 @@ impl Game {
         draw_motes(&self.cam_pos, &view, self.time);
         draw_enemies(&self.enemies, self.time);
         draw_player(&self.player, self.time);
+        self.particles.draw();
 
         set_default_camera();
         self.draw_hud(frame_dt);
@@ -255,6 +337,7 @@ impl Game {
             PlayerState::WallSlide => "WALL SLIDE",
             PlayerState::Dash => "DASH",
             PlayerState::Hurt => "HURT",
+            PlayerState::Attack => "ATTACK",
         };
         draw_text(
             &format!("STATE: {state}"),
@@ -270,7 +353,7 @@ impl Game {
         }
         // Шрифт по умолчанию в macroquad — только ASCII, поэтому HUD на латинице.
         draw_text(
-            "A/D - move   SPACE - jump   SHIFT - dash",
+            "A/D - move   SPACE - jump   SHIFT - dash   J/Z - attack",
             12.0,
             screen_height() - 26.0,
             20.0,
@@ -943,6 +1026,12 @@ fn draw_player(p: &Player, time: f32) {
             lean = 3.0 * p.facing;
             leg_phase = 1.0;
         }
+        PlayerState::Attack => {
+            // Свинг: присед-выпад корпуса вперёд.
+            crouch = 3.0;
+            lean = 2.5 * p.facing;
+            leg_phase = 0.35;
+        }
     }
     let top = y + bob + crouch;
 
@@ -1074,4 +1163,95 @@ fn draw_player(p: &Player, time: f32) {
     draw_rectangle(fx(hl + 10.0, 2.0), top + 2.0, 2.0, 2.0, GOLD);
     // Шейный стояк.
     draw_rectangle(fx(hl + 3.0, 8.0), top + 13.0, 8.0, 2.0, STEEL_DARK);
+
+    // --- меч в передней руке + дуга свинга ---
+    let attacking = p.state == PlayerState::Attack;
+    let hand = Vec2::new(
+        fx(tl + 16.0, 2.0) + 1.0,
+        top + if attacking { 13.0 } else { 17.0 },
+    );
+    // Угол клинка (y-down: положительный — «вниз»). Свинг: из-за головы
+    // через горизонталь вниз; покой — клинок опущен вперёд.
+    let theta = if attacking {
+        let t = p.attack_progress();
+        let ease = t * t * (3.0 - 2.0 * t); // smoothstep
+        -2.55 + ease * 3.25 // -146° → +40°
+    } else {
+        0.87 // ~50° вниз-вперёд
+    };
+    let theta = if facing_right { theta } else { std::f32::consts::PI - theta };
+    let blade_len = if attacking { 30.0 } else { 26.0 };
+    let dirv = Vec2::new(theta.cos(), theta.sin());
+    let perp = Vec2::new(-dirv.y, dirv.x);
+
+    // Шлейф взмаха — три полупрозрачных следа позади клинка.
+    if p.is_attack_active() {
+        for i in 1..=3 {
+            let ta = theta - 0.26 * i as f32 * if facing_right { 1.0 } else { -1.0 };
+            let td = Vec2::new(ta.cos(), ta.sin());
+            let a = 0.34 - i as f32 * 0.09;
+            draw_line(
+                hand.x + td.x * 4.0,
+                hand.y + td.y * 4.0,
+                hand.x + td.x * blade_len,
+                hand.y + td.y * blade_len,
+                5.0,
+                Color::new(0.88, 0.90, 0.94, a),
+            );
+        }
+    }
+
+    // Крестовина (перпендикуляр клинку).
+    let guard_c = hand + dirv * 3.0;
+    draw_line(
+        guard_c.x - perp.x * 6.0,
+        guard_c.y - perp.y * 6.0,
+        guard_c.x + perp.x * 6.0,
+        guard_c.y + perp.y * 6.0,
+        3.0,
+        OUTLINE,
+    );
+    draw_line(
+        guard_c.x - perp.x * 5.0,
+        guard_c.y - perp.y * 5.0,
+        guard_c.x + perp.x * 5.0,
+        guard_c.y + perp.y * 5.0,
+        1.0,
+        GOLD,
+    );
+    // Рукоять и набалдашник.
+    draw_line(
+        hand.x - dirv.x * 5.0,
+        hand.y - dirv.y * 5.0,
+        hand.x + dirv.x * 2.0,
+        hand.y + dirv.y * 2.0,
+        4.0,
+        OUTLINE,
+    );
+    draw_line(
+        hand.x - dirv.x * 4.0,
+        hand.y - dirv.y * 4.0,
+        hand.x + dirv.x * 1.0,
+        hand.y + dirv.y * 1.0,
+        2.0,
+        LEATHER,
+    );
+    draw_rectangle(hand.x - dirv.x * 6.0 - 1.5, hand.y - dirv.y * 6.0 - 1.5, 3.0, 3.0, GOLD);
+    // Клинок: обводка, сталь, режущий край.
+    let tip = hand + dirv * blade_len;
+    let base = hand + dirv * 3.0;
+    draw_line(base.x, base.y, tip.x, tip.y, 6.0, OUTLINE);
+    draw_line(base.x, base.y, tip.x, tip.y, 3.0, STEEL);
+    draw_line(
+        base.x + perp.x * 1.0,
+        base.y + perp.y * 1.0,
+        tip.x + perp.x * 1.0,
+        tip.y + perp.y * 1.0,
+        1.0,
+        STEEL_HI,
+    );
+    // Искра на острие в активных кадрах.
+    if p.is_attack_active() {
+        draw_rectangle(tip.x - 1.5, tip.y - 1.5, 3.0, 3.0, Color::new(1.0, 0.95, 0.80, 0.95));
+    }
 }

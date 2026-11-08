@@ -82,6 +82,8 @@ pub struct PlayerInput {
     pub jump_held: bool,
     /// Кнопка рывка нажата в этом шаге (edge).
     pub dash_pressed: bool,
+    /// Кнопка атаки нажата в этом шаге (edge).
+    pub attack_pressed: bool,
 }
 
 /// Состояния конечного автомата игрока (кадры анимации).
@@ -95,7 +97,20 @@ pub enum PlayerState {
     Dash,
     /// Короткое оглушение после получения урона.
     Hurt,
+    /// Удар мечом (3-х ударное комбо).
+    Attack,
 }
+
+/// Длительность одного свинга атаки, с.
+pub const ATTACK_TIME: f32 = 0.30;
+/// Начало активных кадров (хитбокс включён), с.
+pub const ATTACK_ACTIVE_START: f32 = 0.07;
+/// Конец активных кадров, с.
+pub const ATTACK_ACTIVE_END: f32 = 0.17;
+/// Окно комбо: нажатие с этого момента запускает следующий свинг, с.
+pub const COMBO_WINDOW_START: f32 = 0.10;
+/// Максимальная длина комбо.
+pub const COMBO_MAX: u32 = 3;
 
 /// Максимум очков здоровья («сердец» в HUD).
 pub const PLAYER_MAX_HP: u32 = 5;
@@ -106,6 +121,8 @@ pub const HURT_LOCK_TIME: f32 = 0.32;
 /// Сила отброса при получении урона.
 const HURT_KNOCK_X: f32 = 300.0;
 const HURT_KNOCK_Y: f32 = 330.0;
+/// Шаг вперёд при свинге (затухает к концу удара).
+const ATTACK_STEP_SPEED: f32 = 95.0;
 
 pub struct Player {
     /// Левый верхний угол хитбокса.
@@ -142,6 +159,18 @@ pub struct Player {
     air_dash_used: bool,
     dashing: bool,
     wall_sliding: bool,
+
+    // --- боёвка ---
+    /// Идёт ли свинг прямо сейчас.
+    attacking: bool,
+    /// Текущий свинг отсчитывается от нуля.
+    attack_timer: f32,
+    /// Запланирован ли следующий удар комбо (нажатие в окне).
+    attack_queued: bool,
+    /// Номер текущего свинга в комбо (1..=3).
+    combo_index: u32,
+    /// Номер свинга: растёт при каждом ударе — враги помнят, куда били.
+    swing_id: u32,
 }
 
 impl Player {
@@ -168,6 +197,11 @@ impl Player {
             air_dash_used: false,
             dashing: false,
             wall_sliding: false,
+            attacking: false,
+            attack_timer: 0.0,
+            attack_queued: false,
+            combo_index: 0,
+            swing_id: 0,
         }
     }
 
@@ -209,6 +243,85 @@ impl Player {
         self.iframe_timer > 0.0 || self.has_dash_iframes()
     }
 
+    /// Идёт ли свинг атаки.
+    pub fn is_attacking(&self) -> bool {
+        self.attacking
+    }
+
+    /// Номер свинга (для учёта попаданий: один свинг — один удар по врагу).
+    pub fn swing_id(&self) -> u32 {
+        self.swing_id
+    }
+
+    /// Прогресс текущего свинга: `0.0 ..= 1.0` по [`ATTACK_TIME`].
+    pub fn attack_progress(&self) -> f32 {
+        if self.attacking {
+            (self.attack_timer / ATTACK_TIME).clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    }
+
+    /// Нормализованный момент активных кадров `0.0 ..= 1.0`,
+    /// `None` — хитбокс выключен.
+    pub fn attack_active_t(&self) -> Option<f32> {
+        if !self.attacking
+            || self.attack_timer < ATTACK_ACTIVE_START
+            || self.attack_timer > ATTACK_ACTIVE_END
+        {
+            return None;
+        }
+        Some(
+            (self.attack_timer - ATTACK_ACTIVE_START)
+                / (ATTACK_ACTIVE_END - ATTACK_ACTIVE_START),
+        )
+    }
+
+    /// Есть ли сейчас хитбокс удара.
+    pub fn is_attack_active(&self) -> bool {
+        self.attack_active_t().is_some()
+    }
+
+    /// Хитбокс активных кадров: перед персонажом.
+    pub fn attack_hitbox(&self) -> Option<Aabb> {
+        self.attack_active_t()?;
+        let reach = 34.0;
+        let x = if self.facing >= 0.0 {
+            self.pos.x + self.size.x - 4.0
+        } else {
+            self.pos.x - reach + 4.0
+        };
+        Some(Aabb::new(x, self.pos.y + 6.0, reach, self.size.y - 14.0))
+    }
+
+    /// Урон текущего свинга: 1-й и 2-й удар — 1, финальный — 2.
+    pub fn attack_damage(&self) -> u32 {
+        match self.combo_index {
+            1 => 1,
+            2 => 1,
+            _ => 2,
+        }
+    }
+
+    /// Начать первый свинг комбо.
+    fn start_attack(&mut self) {
+        self.attacking = true;
+        self.attack_timer = 0.0;
+        self.attack_queued = false;
+        self.combo_index = 1;
+        self.swing_id = self.swing_id.wrapping_add(1);
+    }
+
+    /// Отменить атаку (рывок, получение урона) с инвалидацией хитбокса.
+    fn cancel_attack(&mut self) {
+        if self.attacking || self.combo_index != 0 {
+            self.attacking = false;
+            self.attack_queued = false;
+            self.combo_index = 0;
+            self.swing_id = self.swing_id.wrapping_add(1);
+        }
+    }
+
     /// Получение урона: отбрасывание, i-frames и короткая потеря
     /// управления. `knock_dir` — направление отброса (`-1` — влево).
     /// Возвращает `true`, если урон применился (иначе — i-frames/смерть).
@@ -220,6 +333,7 @@ impl Player {
         self.iframe_timer = PLAYER_IFRAMES;
         self.hurt_timer = HURT_LOCK_TIME;
         self.dashing = false;
+        self.cancel_attack();
         self.vel = Vec2::new(knock_dir * HURT_KNOCK_X, -HURT_KNOCK_Y);
         self.state = PlayerState::Hurt;
         self.state_time = 0.0;
@@ -245,6 +359,11 @@ impl Player {
         // только летит по инерции и падает под гравитацией.
         let stunned = self.hurt_timer > 0.0;
 
+        // Старт удара: только вне оглушения, рывка и другого свинга.
+        if input.attack_pressed && !stunned && !self.dashing && !self.attacking {
+            self.start_attack();
+        }
+
         let move_x = if stunned {
             0.0
         } else {
@@ -267,15 +386,43 @@ impl Player {
                 self.vel.x = self.facing * RUN_SPEED * DASH_CARRY_SPEED;
             }
         } else if input.dash_pressed && self.dash_cooldown <= 0.0 && !self.air_dash_used {
-            // ---------- СТАРТ DASH ----------
+            // ---------- СТАРТ DASH (рывок отменяет свинг) ----------
             if move_x.abs() > 0.1 {
                 self.facing = move_x.signum();
             }
+            self.cancel_attack();
             self.dashing = true;
             self.dash_timer = DASH_TIME;
             self.dash_cooldown = DASH_COOLDOWN;
             if !self.on_ground {
                 self.air_dash_used = true;
+            }
+        } else if self.attacking {
+            // ---------- АТАКА МЕЧОМ ----------
+            self.attack_timer += dt;
+            if self.on_ground {
+                // Затухающий шаг вперёд — свинг «втягивает» тело.
+                let step = ATTACK_STEP_SPEED * (1.0 - (self.attack_timer / ATTACK_TIME).min(1.0));
+                self.vel.x = self.facing * step;
+            } else {
+                // В воздухе управление отдано инерции удара.
+                self.vel.x = move_toward(self.vel.x, 0.0, AIR_DECEL * dt);
+            }
+            apply_gravity(&mut self.vel, dt, GRAVITY, MAX_FALL_SPEED);
+
+            // Окно комбо: нажатие запускает следующий свинг.
+            if input.attack_pressed && self.attack_timer >= COMBO_WINDOW_START {
+                self.attack_queued = true;
+            }
+            if self.attack_timer >= ATTACK_TIME {
+                if self.attack_queued && self.combo_index < COMBO_MAX {
+                    self.combo_index += 1;
+                    self.attack_timer = 0.0;
+                    self.attack_queued = false;
+                    self.swing_id = self.swing_id.wrapping_add(1);
+                } else {
+                    self.cancel_attack();
+                }
             }
         } else {
             // ---------- ОБЫЧНОЕ ДВИЖЕНИЕ ----------
@@ -367,6 +514,8 @@ impl Player {
             PlayerState::Hurt
         } else if self.dashing {
             PlayerState::Dash
+        } else if self.attacking {
+            PlayerState::Attack
         } else if self.on_ground {
             if self.vel.x.abs() > 12.0 {
                 PlayerState::Run
@@ -601,5 +750,80 @@ mod tests {
         assert_eq!(player.hp, player.max_hp);
         assert_eq!(player.state, PlayerState::Idle);
         assert!(!player.is_invulnerable());
+    }
+
+    /// Хитбокс включается только в активных кадрах свинга.
+    #[test]
+    fn attack_active_window_and_hitbox() {
+        let (world, spawn) = flat_world();
+        let mut player = Player::new(spawn);
+        let idle = PlayerInput::default();
+        for _ in 0..30 {
+            player.update(&idle, &world, FIXED_DT);
+        }
+
+        let atk = PlayerInput {
+            attack_pressed: true,
+            ..Default::default()
+        };
+        player.update(&atk, &world, FIXED_DT);
+        assert!(player.is_attacking());
+        assert_eq!(player.state, PlayerState::Attack);
+        assert!(!player.is_attack_active(), "до активных кадров — нет хитбокса");
+        assert_eq!(player.attack_damage(), 1);
+
+        // Кадр ~0.10 с — активное окно (0.07..=0.17) открыто.
+        for _ in 0..5 {
+            player.update(&idle, &world, FIXED_DT);
+        }
+        assert!(player.is_attack_active(), "окно активных кадров");
+        let hitbox = player.attack_hitbox().expect("хитбокс активных кадров");
+        assert!(hitbox.overlaps(&player.body()));
+
+        // Свинг завершается по ATTACK_TIME и снимает состояние.
+        for _ in 0..16 {
+            player.update(&idle, &world, FIXED_DT);
+        }
+        assert!(!player.is_attacking(), "свинг должен завершиться");
+        assert_ne!(player.state, PlayerState::Attack);
+    }
+
+    /// Нажатие в окне комбо запускает следующий свинг (до 3 ударов).
+    #[test]
+    fn combo_chains_up_to_three_swings() {
+        let (world, spawn) = flat_world();
+        let mut player = Player::new(spawn);
+        let idle = PlayerInput::default();
+        for _ in 0..30 {
+            player.update(&idle, &world, FIXED_DT);
+        }
+
+        let atk = PlayerInput {
+            attack_pressed: true,
+            ..Default::default()
+        };
+        player.update(&atk, &world, FIXED_DT);
+        let first_swing = player.swing_id();
+        assert_eq!(player.combo_index, 1);
+
+        // В окне комбо (>= 0.10 с) жмём атаку снова.
+        for _ in 0..6 {
+            player.update(&idle, &world, FIXED_DT);
+        }
+        player.update(&atk, &world, FIXED_DT);
+        // Ждём конца свинга — буферизированное нажатие разворачивает второй.
+        for _ in 0..12 {
+            player.update(&idle, &world, FIXED_DT);
+        }
+        assert!(player.is_attacking(), "второй свинг должен начаться");
+        assert_ne!(player.swing_id(), first_swing, "номер свинга изменился");
+        assert_eq!(player.combo_index, 2);
+        assert_eq!(player.attack_damage(), 1);
+
+        // Без нажатий комбо обрывается после второго свинга.
+        for _ in 0..24 {
+            player.update(&idle, &world, FIXED_DT);
+        }
+        assert!(!player.is_attacking(), "без нажатия комбо не продолжается");
     }
 }

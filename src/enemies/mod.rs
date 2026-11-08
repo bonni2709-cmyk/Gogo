@@ -190,6 +190,15 @@ pub struct ContactHit {
     pub center: Vec2,
 }
 
+/// Результат одного шага симуляции врагов.
+#[derive(Default)]
+pub struct EnemyUpdate {
+    /// Контакты, задевшие игроку (учитывает i-frames сам игрок).
+    pub contacts: Vec<ContactHit>,
+    /// Погибшие на этом шаге: центр взрыва и вид (для частиц).
+    pub deaths: Vec<(Vec2, EnemyKind)>,
+}
+
 // ---------------------------------------------------------------------------
 // Хранилище врагов
 // ---------------------------------------------------------------------------
@@ -286,13 +295,14 @@ impl EnemyWorld {
 
     /// Шаг симуляции всех врагов (фиксированный `dt`).
     ///
-    /// Возвращает контакты, задевшие игроку на этом шаге (игрок сам
-    /// решает, учитывать ли их — у него есть i-frames и рывок).
-    pub fn update(&mut self, world: &World, player: &Player, dt: f32) -> Vec<ContactHit> {
+    /// Возвращает контакты с игроком (i-frames решает сам игрок) и
+    /// список погибших — для пиксельного взрыва частицами.
+    pub fn update(&mut self, world: &World, player: &Player, dt: f32) -> EnemyUpdate {
         let p_body = player.body();
 
         let entities: Vec<Entity> = self.brains.entities().collect();
         let mut hits = Vec::new();
+        let mut deaths = Vec::new();
         let mut dead = Vec::new();
 
         for entity in entities {
@@ -373,6 +383,7 @@ impl EnemyWorld {
 
             // --- смерть и контактный урон ---
             if health.hp == 0 {
+                deaths.push((transform.center(), brain.kind));
                 dead.push(entity);
                 continue;
             }
@@ -388,7 +399,10 @@ impl EnemyWorld {
         for entity in dead {
             self.despawn(entity);
         }
-        hits
+        EnemyUpdate {
+            contacts: hits,
+            deaths,
+        }
     }
 
     /// Обход живых врагов (для отрисовки и будущей боевой системы).
@@ -502,6 +516,16 @@ pub(crate) mod palette {
     pub const SHADOW: Color = Color::new(0.0, 0.0, 0.0, 0.35);
     /// Обводка силуэтов (почти чёрный тёплый).
     pub const OUTLINE: Color = Color::new(0.055, 0.047, 0.039, 1.0);
+}
+
+/// Цвета «пиксельного взрыва» при смерти вида.
+pub fn death_palette(kind: EnemyKind) -> [Color; 4] {
+    use palette::*;
+    match kind {
+        EnemyKind::Slime => [SLIME, SLIME_BELLY, SLIME_DARK, SLIME_GLOSS],
+        EnemyKind::Bat => [BAT, BAT_WING, BAT_FUR, TATTER],
+        EnemyKind::Skeleton => [BONE, BONE_DARK, STEEL, RUST],
+    }
 }
 
 /// Отрисовать всех живых врагов (в детерминированном порядке).
@@ -661,13 +685,13 @@ mod tests {
         player.pos = Vec2::new(2.0, 260.0);
 
         let hits1 = enemies.update(&world, &player, crate::physics::FIXED_DT);
-        assert_eq!(hits1.len(), 1);
-        assert!(player.take_damage(hits1[0].damage, -1.0));
+        assert_eq!(hits1.contacts.len(), 1);
+        assert!(player.take_damage(hits1.contacts[0].damage, -1.0));
         assert_eq!(player.hp, player.max_hp - 1);
 
         // Второй контакт в кадр i-frames не проходит.
         let hits2 = enemies.update(&world, &player, crate::physics::FIXED_DT);
-        if let Some(hit) = hits2.first() {
+        if let Some(hit) = hits2.contacts.first() {
             assert!(!player.take_damage(hit.damage, -1.0), "i-frames");
         }
         assert_eq!(player.hp, player.max_hp - 1);
@@ -682,7 +706,9 @@ mod tests {
 
         assert!(enemies.damage(slime, 99, -1.0));
         assert_eq!(enemies.health(slime).unwrap().hp, 0);
-        enemies.update(&world, &player, crate::physics::FIXED_DT);
+        let step = enemies.update(&world, &player, crate::physics::FIXED_DT);
+        assert_eq!(step.deaths.len(), 1, "смерть должна отдаваться наружу");
+        assert_eq!(step.deaths[0].1, EnemyKind::Slime);
         assert!(!enemies.is_alive(slime));
         assert!(enemies.is_empty());
         assert!(!enemies.damage(slime, 1, -1.0), "мёртвому — не бьёт");
