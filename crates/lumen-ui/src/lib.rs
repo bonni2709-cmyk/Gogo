@@ -62,36 +62,81 @@ fn unavailable(weak: &slint::Weak<AppWindow>, message: String) {
     });
 }
 
+fn recovering(weak: &slint::Weak<AppWindow>, deadline: std::time::Instant, reason: String) {
+    let seconds = deadline.saturating_duration_since(std::time::Instant::now()).as_secs().max(1);
+    let message = format!("{reason} · automatic network check in about {seconds}s");
+    tracing::warn!(%message);
+    let _ = weak.upgrade_in_event_loop(move |ui| {
+        ui.set_status(message.into());
+        ui.set_connected(false);
+        ui.set_busy(true);
+        ui.set_searching(false);
+    });
+}
+
+async fn verify_network(
+    weak: &slint::Weak<AppWindow>,
+    strategies: &tokio::sync::watch::Sender<Option<lumen_core::Strategy>>,
+    failures: &mut tokio::sync::watch::Receiver<()>,
+    recovery: &mut lumen_core::recovery::RecoveryPolicy,
+    address: std::net::SocketAddr,
+) {
+    strategies.send_replace(None);
+    let _ = weak.upgrade_in_event_loop(|ui| {
+        ui.set_connected(false); ui.set_busy(true);
+        ui.set_status("Automatically testing TLS transports…".into());
+    });
+    match lumen_core::select().await {
+        Ok(selection) => {
+            strategies.send_replace(Some(selection.strategy));
+            recovery.verified(std::time::Instant::now());
+            let message = format!("Transport: {:?} · proxy {}", selection.strategy, address);
+            let _ = weak.upgrade_in_event_loop(move |ui| {
+                ui.set_status(message.into()); ui.set_busy(false); ui.set_connected(true);
+            });
+        }
+        Err(error) => {
+            let at = recovery.failed(std::time::Instant::now());
+            recovering(weak, at, format!("Network self-test failed: {error:#}"));
+        }
+    }
+    // Errors from already-failing sessions during the scan do not trigger another immediate scan.
+    let _ = failures.borrow_and_update();
+}
+
 async fn worker(weak: slint::Weak<AppWindow>, mut commands: mpsc::Receiver<Command>, player: Option<PlayerLauncher>) {
-    let mut proxy: Option<tokio::task::JoinHandle<anyhow::Result<()>>> = None;
-    let mut search: Option<lumen_youtube::SearchClient> = None;
+    let (strategies, strategy_rx) = tokio::sync::watch::channel(None);
+    let (failure_tx, mut failures) = tokio::sync::watch::channel(());
+    // Bind once: all metadata clients and existing player sessions keep this same address.
+    let setup = async {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let client = lumen_youtube::SearchClient::with_failure_signal(address, failure_tx)?;
+        Ok::<_, anyhow::Error>((listener, address, client))
+    }.await;
+    let (listener, address, client) = match setup {
+        Ok(setup) => setup,
+        Err(error) => { unavailable(&weak, format!("Local proxy initialization failed: {error:#}")); return; }
+    };
+    let mut proxy = tokio::spawn(lumen_proxy::serve_dynamic(listener, strategy_rx));
+    let search = Some(client);
+    let mut recovery = lumen_core::recovery::RecoveryPolicy::default();
     loop {
+        let retry_at = recovery.retry_at();
         tokio::select! {
             command = commands.recv() => {
                 let Some(command) = command else { break; };
+                if !matches!(command, Command::Start) && strategies.borrow().is_none() {
+                    let _ = weak.upgrade_in_event_loop(|ui| {
+                        ui.set_searching(false);
+                        ui.set_search_status("Network recovery is in progress; try again when connected.".into());
+                    });
+                    continue;
+                }
                 match command {
                     Command::Start => {
-                        if search.is_some() { continue; }
-                        let result = async {
-                            let selection = lumen_core::select().await?;
-                            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-                            let address = listener.local_addr()?;
-                            let client = lumen_youtube::SearchClient::new(address)?;
-                            Ok::<_, anyhow::Error>((selection, listener, address, client))
-                        }.await;
-                        match result {
-                            Ok((selection, listener, address, client)) => {
-                                proxy = Some(tokio::spawn(lumen_proxy::serve(listener, selection.strategy)));
-                                search = Some(client);
-                                let message = format!("Transport: {:?} · proxy {}", selection.strategy, address);
-                                let _ = weak.upgrade_in_event_loop(move |ui| {
-                                    ui.set_status(message.into());
-                                    ui.set_busy(false);
-                                    ui.set_connected(true);
-                                });
-                            }
-                            Err(error) => unavailable(&weak, format!("Network unavailable: {error:#}")),
-                        }
+                        if strategies.borrow().is_some() || recovery.retry_at().is_some() { continue; }
+                        verify_network(&weak, &strategies, &mut failures, &mut recovery, address).await;
                     }
                     Command::Prepare(id) => {
                         let result = match search.as_ref() {
@@ -100,7 +145,7 @@ async fn worker(weak: slint::Weak<AppWindow>, mut commands: mpsc::Receiver<Comma
                                     let stream = client.prepare_stream(&id).await?;
                                     let metadata = stream.metadata.clone();
                                     let session = lumen_youtube::PlaybackSession::start(client.clone(), stream).await?;
-                                    // A dedicated Windows UI thread owns the session until its window closes.
+                                    // Platform player owns the session until its window/Activity closes.
                                     launch(session)?;
                                     Ok(metadata)
                                 } else {
@@ -144,19 +189,33 @@ async fn worker(weak: slint::Weak<AppWindow>, mut commands: mpsc::Receiver<Comma
                     }
                 }
             }
-            result = async {
-                match proxy.as_mut() {
-                    Some(task) => task.await,
-                    None => std::future::pending().await,
+            result = &mut proxy => {
+                unavailable(&weak, format!("Local proxy stopped: {result:?}"));
+                break;
+            }
+            result = failures.changed() => {
+                if result.is_err() { break; }
+                let _ = failures.borrow_and_update();
+                let verified = strategies.borrow().is_some();
+                if verified {
+                    strategies.send_replace(None);
+                    let at = recovery.failed(std::time::Instant::now());
+                    recovering(&weak, at, "Transport failure detected".into());
+                }
+            }
+            _ = async {
+                match retry_at {
+                    Some(at) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
+                    None => std::future::pending::<()>().await,
                 }
             } => {
-                proxy = None;
-                search = None;
-                unavailable(&weak, format!("Local proxy stopped: {result:?}"));
+                if recovery.begin_due_attempt(std::time::Instant::now()) {
+                    verify_network(&weak, &strategies, &mut failures, &mut recovery, address).await;
+                }
             }
         }
     }
-    if let Some(proxy) = proxy { proxy.abort(); }
+    proxy.abort();
 }
 
 pub fn run() -> Result<(), slint::PlatformError> { run_with_player(None) }

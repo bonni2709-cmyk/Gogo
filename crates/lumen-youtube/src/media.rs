@@ -102,10 +102,10 @@ impl SearchClient {
     pub async fn inspect_stream(&self, stream: &MediaStream) -> Result<PreparedVideo> {
         if stream.expires <= current_time()?.saturating_add(30) { bail!("media URL expired"); }
         let mut response = self.0.get(stream.url.clone()).header(header::RANGE, "bytes=0-0")
-            .send().await.map_err(reqwest::Error::without_url)?;
+            .send().await.map_err(|error| { self.note_transport_error(&error); error.without_url() })?;
         validate_range(response.status(), response.headers())?;
         let mut received = 0;
-        while let Some(bytes) = response.chunk().await.map_err(reqwest::Error::without_url)? {
+        while let Some(bytes) = response.chunk().await.map_err(|error| { self.note_transport_error(&error); error.without_url() })? {
             received += bytes.len();
             if received > 1 { bail!("CDN sent more than one requested byte"); }
         }
@@ -129,7 +129,7 @@ impl SearchClient {
         if stream.expires <= current_time()?.saturating_add(5) { bail!("media URL expired"); }
         let mut request = if head { self.1.head(stream.url.clone()) } else { self.1.get(stream.url.clone()) };
         if let Some(range) = range { request = request.header(header::RANGE, range); }
-        request.send().await.map_err(reqwest::Error::without_url).map_err(Into::into)
+        request.send().await.map_err(|error| { self.note_transport_error(&error); error.without_url() }).map_err(Into::into)
     }
 
 }

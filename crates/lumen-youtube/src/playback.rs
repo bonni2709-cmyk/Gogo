@@ -129,7 +129,8 @@ async fn media(State(state): State<Arc<Gateway>>, Path(token): Path<String>, met
     let Ok((output, length)) = response_headers(status, upstream.headers(), range.and_then(parse_range)) else { return empty(StatusCode::BAD_GATEWAY); };
     let body = if method == Method::HEAD { Body::empty() } else {
         let cancel = state.cancel.clone();
-        let stream = futures_util::stream::try_unfold((upstream, length, permit, cancel), |(mut response, remaining, permit, cancel)| async move {
+        let client = state.client.clone();
+        let stream = futures_util::stream::try_unfold((upstream, length, permit, cancel, client), |(mut response, remaining, permit, cancel, client)| async move {
             if remaining == 0 { return Ok::<_, std::io::Error>(None); }
             let chunk = tokio::select! {
                 _ = cancel.cancelled() => return Err(std::io::Error::other("playback session closed")),
@@ -138,7 +139,15 @@ async fn media(State(state): State<Arc<Gateway>>, Path(token): Path<String>, met
             match chunk {
                 Ok(Ok(Some(bytes))) if !bytes.is_empty() && bytes.len() as u64 <= remaining => {
                     let remaining = remaining - bytes.len() as u64;
-                    Ok(Some((bytes, (response, remaining, permit, cancel))))
+                    Ok(Some((bytes, (response, remaining, permit, cancel, client))))
+                }
+                Ok(Err(error)) => {
+                    client.note_transport_error(&error);
+                    Err(std::io::Error::other("media transfer interrupted"))
+                }
+                Err(_) => {
+                    client.note_network_failure();
+                    Err(std::io::Error::other("media transfer stalled"))
                 }
                 _ => Err(std::io::Error::other("media transfer interrupted")),
             }

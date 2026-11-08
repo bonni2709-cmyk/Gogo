@@ -8,7 +8,7 @@ use tokio_rustls::{rustls::{self, pki_types::PrivatePkcs8KeyDer}, TlsAcceptor};
 const CONTENT: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
 
 #[derive(Clone, Copy)]
-enum Mode { Normal, WrongRange, Redirect, Truncated, Stalled }
+enum Mode { Normal, WrongRange, Redirect, HttpError, Truncated, Stalled }
 
 struct Fixture {
     client: SearchClient,
@@ -74,6 +74,11 @@ impl Fixture {
                                 let (name, value) = line.split_once(':')?;
                                 name.eq_ignore_ascii_case("range").then(|| value.trim())
                             });
+                            if matches!(mode, Mode::HttpError) {
+                                let _ = tls.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+                                let _ = tls.shutdown().await;
+                                return;
+                            }
                             if matches!(mode, Mode::Redirect) {
                                 let _ = tls.write_all(b"HTTP/1.1 302 Found\r\nLocation: https://evil.test/token\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
                                 let _ = tls.shutdown().await;
@@ -138,7 +143,12 @@ impl Fixture {
             builder = builder.add_root_certificate(reqwest::Certificate::from_der(der.as_ref()).unwrap());
         }
         let client = builder.build().unwrap();
-        Self { client: SearchClient(client.clone(), client), origin_count, connect_count, origin, proxy }
+        Self { client: SearchClient(client.clone(), client, None), origin_count, connect_count, origin, proxy }
+    }
+    fn failure_signal(&mut self) -> tokio::sync::watch::Receiver<()> {
+        let (signal, failures) = tokio::sync::watch::channel(());
+        self.client.2 = Some(signal);
+        failures
     }
     async fn session(&self) -> PlaybackSession {
         PlaybackSession::start(self.client.clone(), crate::media::fixture_stream()).await.unwrap()
@@ -176,11 +186,13 @@ async fn full_head_and_seek_bytes_cross_connect_tls_gateway() {
 
 #[tokio::test]
 async fn rejects_valid_but_different_cdn_range() {
-    let fixture = Fixture::new(Mode::WrongRange, true).await;
+    let mut fixture = Fixture::new(Mode::WrongRange, true).await;
+    let failures = fixture.failure_signal();
     let session = fixture.session().await;
     let response = player().get(session.local_url()).header(header::RANGE, "bytes=10-19").send().await.unwrap();
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     assert!(response.bytes().await.unwrap().is_empty());
+    assert!(!failures.has_changed().unwrap(), "invalid CDN ranges are not transport failures");
 }
 
 #[tokio::test]
@@ -206,7 +218,8 @@ async fn does_not_follow_cdn_redirect_or_leak_response_headers() {
 
 #[tokio::test]
 async fn reports_truncated_body_as_error_instead_of_successful_video() {
-    let fixture = Fixture::new(Mode::Truncated, true).await;
+    let mut fixture = Fixture::new(Mode::Truncated, true).await;
+    let failures = fixture.failure_signal();
     let session = fixture.session().await;
     // Depending on transport scheduling, hyper may abort before or after sending headers.
     if let Ok(response) = player().get(session.local_url()).send().await {
@@ -214,15 +227,33 @@ async fn reports_truncated_body_as_error_instead_of_successful_video() {
     }
     assert_eq!(fixture.origin_count.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.connect_count.load(Ordering::SeqCst), 1);
+    assert!(failures.has_changed().unwrap(), "broken body must notify the recovery controller");
 }
 
 #[tokio::test]
 async fn closing_session_cancels_an_active_stalled_body() {
-    let fixture = Fixture::new(Mode::Stalled, true).await;
+    let mut fixture = Fixture::new(Mode::Stalled, true).await;
+    let failures = fixture.failure_signal();
     let session = fixture.session().await;
     let mut response = player().get(session.local_url()).send().await.unwrap();
     assert_eq!(response.chunk().await.unwrap().unwrap().as_ref(), &CONTENT[..1]);
     drop(session);
     let result = timeout(Duration::from_secs(2), response.chunk()).await.expect("session cancellation must interrupt streaming");
     assert!(result.is_err());
+    assert!(!failures.has_changed().unwrap(), "intentional session close must not rescan the network");
+}
+
+
+#[tokio::test]
+async fn http_status_and_parse_errors_do_not_signal_network_recovery() {
+    for mode in [Mode::HttpError, Mode::Normal] {
+        let mut fixture = Fixture::new(mode, true).await;
+        let failures = fixture.failure_signal();
+        let result = fixture.client.fetch_html(reqwest::Url::parse("https://rr1.googlevideo.com/videoplayback?probe=1").unwrap()).await;
+        match result {
+            Ok(body) => assert!(crate::parse_search(&body).is_err()),
+            Err(error) => assert!(error.downcast_ref::<reqwest::Error>().unwrap().is_status()),
+        }
+        assert!(!failures.has_changed().unwrap(), "HTTP status/schema errors do not justify a network rescan");
+    }
 }

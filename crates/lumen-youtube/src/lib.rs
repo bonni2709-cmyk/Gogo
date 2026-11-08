@@ -21,11 +21,17 @@ pub struct Video {
 }
 
 #[derive(Clone)]
-pub struct SearchClient(reqwest::Client, reqwest::Client);
+pub struct SearchClient(reqwest::Client, reqwest::Client, Option<tokio::sync::watch::Sender<()>>);
 
 impl SearchClient {
     /// An explicit loopback proxy is mandatory; system/environment proxies are ignored.
-    pub fn new(proxy: SocketAddr) -> Result<Self> {
+    pub fn new(proxy: SocketAddr) -> Result<Self> { Self::build(proxy, None) }
+
+    pub fn with_failure_signal(proxy: SocketAddr, signal: tokio::sync::watch::Sender<()>) -> Result<Self> {
+        Self::build(proxy, Some(signal))
+    }
+
+    fn build(proxy: SocketAddr, signal: Option<tokio::sync::watch::Sender<()>>) -> Result<Self> {
         if !proxy.ip().is_loopback() { bail!("search requires a loopback proxy"); }
         let builder = || -> Result<reqwest::ClientBuilder> {
             Ok(reqwest::Client::builder()
@@ -36,7 +42,7 @@ impl SearchClient {
                 .read_timeout(Duration::from_secs(20))
                 .user_agent("Mozilla/5.0 LumenTube/0.1"))
         };
-        Ok(Self(builder()?.timeout(Duration::from_secs(25)).build()?, builder()?.build()?))
+        Ok(Self(builder()?.timeout(Duration::from_secs(25)).build()?, builder()?.build()?, signal))
     }
 
     pub async fn search(&self, query: &str) -> Result<Vec<Video>> {
@@ -49,15 +55,29 @@ impl SearchClient {
     }
 
     async fn fetch_html(&self, url: reqwest::Url) -> Result<String> {
-        let mut response = self.0.get(url).send().await?.error_for_status()?;
+        let mut response = self.0.get(url).send().await.inspect_err(|error| {
+            self.note_transport_error(error);
+        })?.error_for_status()?;
         if response.status().is_redirection() { bail!("YouTube redirected the request; consent or login may be required"); }
         if response.content_length().is_some_and(|size| size > MAX_BODY as u64) { bail!("HTML response too large"); }
         let mut body = Vec::new();
-        while let Some(chunk) = response.chunk().await? {
+        while let Some(chunk) = response.chunk().await.inspect_err(|error| {
+            self.note_transport_error(error);
+        })? {
             if body.len() + chunk.len() > MAX_BODY { bail!("HTML response too large"); }
             body.extend_from_slice(&chunk);
         }
         String::from_utf8(body).context("HTML response is not UTF-8")
+    }
+
+    pub(crate) fn note_transport_error(&self, error: &reqwest::Error) {
+        if error.is_connect() || error.is_timeout() || error.is_body() || error.is_request() {
+            self.note_network_failure();
+        }
+    }
+
+    pub(crate) fn note_network_failure(&self) {
+        if let Some(signal) = &self.2 { signal.send_replace(()); }
     }
 
 }
@@ -162,4 +182,20 @@ mod tests {
         drop(listener);
         assert!(SearchClient::new(address).unwrap().search("rust").await.is_err());
     }
+    #[tokio::test]
+    async fn reports_transport_failure_but_not_invalid_user_input() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let (signal, mut failures) = tokio::sync::watch::channel(());
+        let client = SearchClient::with_failure_signal(address, signal).unwrap();
+        assert!(client.search("").await.is_err());
+        assert!(client.resolve_video("bad").await.is_err());
+        assert!(!failures.has_changed().unwrap());
+        assert!(client.search("rust").await.is_err());
+        assert!(failures.has_changed().unwrap());
+        let _ = failures.borrow_and_update();
+        assert!(!failures.has_changed().unwrap());
+    }
+
 }

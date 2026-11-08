@@ -1,4 +1,6 @@
 //! Unprivileged transports. Splitting writes is best effort, not IP fragmentation.
+pub mod recovery;
+
 use anyhow::{bail, Context, Result};
 use std::{net::IpAddr, sync::Arc, time::{Duration, Instant}};
 use tokio::{io::{AsyncReadExt, AsyncWriteExt, DuplexStream}, net::TcpStream, time::{sleep, timeout}};
