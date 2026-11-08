@@ -218,19 +218,19 @@ impl Game {
                 self.swing_hits.clear();
             }
             if let Some(hitbox) = self.player.attack_hitbox() {
-                // Сначала собираем цели — иначе borrow врагов мешает урону.
+                // Сначала собираем цели (entity + центр) — иначе borrow
+                // врагов мешает нанесению урона.
                 let mut targets = Vec::new();
-                for (entity, _, _) in self.enemies.iter() {
+                for (entity, transform, _, _) in self.enemies.iter() {
                     if !self.swing_hits.contains(&entity)
-                        && self.enemies.body(entity).overlaps(&hitbox)
+                        && transform.body().overlaps(&hitbox)
                     {
-                        targets.push(entity);
+                        targets.push((entity, transform.center()));
                     }
                 }
                 let damage = self.player.attack_damage();
-                for entity in targets {
+                for (entity, center) in targets {
                     self.swing_hits.push(entity);
-                    let center = self.enemies.body(entity).center();
                     // Отброс врага — от игрока.
                     let dir = if center.x >= self.player.body().center().x {
                         1.0
@@ -249,7 +249,7 @@ impl Game {
         // ---------- ШАГ ВРАГОВ: смерть взрывается пикселями ----------
         let step = self.enemies.update(&self.world, &self.player, FIXED_DT);
         for (pos, kind) in step.deaths {
-            self.particles.death_burst(pos, death_palette(kind));
+            self.particles.death_burst(pos, &death_palette(kind));
             self.hitstop = self.hitstop.max(0.05);
         }
 
