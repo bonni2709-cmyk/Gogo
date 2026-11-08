@@ -141,8 +141,10 @@ async fn media(State(state): State<Arc<Gateway>>, Path(token): Path<String>, met
                     let remaining = remaining - bytes.len() as u64;
                     Ok(Some((bytes, (response, remaining, permit, cancel, client))))
                 }
-                Ok(Err(error)) => {
-                    client.note_transport_error(&error);
+                Ok(Err(_)) | Ok(Ok(None)) => {
+                    // Body read failures can be categorized as decode errors by reqwest;
+                    // an EOF with remaining bytes is also a transport interruption.
+                    client.note_network_failure();
                     Err(std::io::Error::other("media transfer interrupted"))
                 }
                 Err(_) => {

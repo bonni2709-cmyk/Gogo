@@ -105,11 +105,11 @@ impl SearchClient {
             .send().await.map_err(|error| { self.note_transport_error(&error); error.without_url() })?;
         validate_range(response.status(), response.headers())?;
         let mut received = 0;
-        while let Some(bytes) = response.chunk().await.map_err(|error| { self.note_transport_error(&error); error.without_url() })? {
+        while let Some(bytes) = response.chunk().await.map_err(|error| { self.note_network_failure(); error.without_url() })? {
             received += bytes.len();
             if received > 1 { bail!("CDN sent more than one requested byte"); }
         }
-        if received != 1 { bail!("CDN returned an empty body"); }
+        if received != 1 { self.note_network_failure(); bail!("CDN returned an empty body"); }
         Ok(stream.metadata.clone())
     }
 

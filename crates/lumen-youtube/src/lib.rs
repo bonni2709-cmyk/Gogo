@@ -61,8 +61,8 @@ impl SearchClient {
         if response.status().is_redirection() { bail!("YouTube redirected the request; consent or login may be required"); }
         if response.content_length().is_some_and(|size| size > MAX_BODY as u64) { bail!("HTML response too large"); }
         let mut body = Vec::new();
-        while let Some(chunk) = response.chunk().await.inspect_err(|error| {
-            self.note_transport_error(error);
+        while let Some(chunk) = response.chunk().await.inspect_err(|_| {
+            self.note_network_failure();
         })? {
             if body.len() + chunk.len() > MAX_BODY { bail!("HTML response too large"); }
             body.extend_from_slice(&chunk);
