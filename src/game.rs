@@ -92,6 +92,7 @@ pub async fn run() {
 
     loop {
         let frame_dt = get_frame_time().min(0.25);
+        game.touch.update();
         game.sample_edges();
 
         accumulator += frame_dt;
@@ -186,6 +187,14 @@ struct Game {
     swing_hits: Vec<crate::ecs::Entity>,
     /// Номер свинга, обработанный в `swing_hits`.
     last_swing: u32,
+    // --- сенсорное управление и пауза ---
+    touch: crate::ui::TouchUi,
+    /// Пауза: симуляция стоит, мир рисуется под затемнением.
+    paused: bool,
+    /// Мана: тратится на рывок, копится со временем (HUD).
+    mana: f32,
+    prev_dashing: bool,
+    prev_on_ground: bool,
     // --- уровень: платформы, ловушки, чекпоинты, золото ---
     movers: Vec<Mover>,
     spikes: Vec<Aabb>,
@@ -212,10 +221,18 @@ impl Game {
         }
         let spawn = level.spawn;
         let movers = level.movers.iter().map(Mover::new).collect();
+        // Тачи не должны синтезировать клики мыши — иначе каждое касание
+        // кнопки выстреливало бы атакой.
+        simulate_mouse_with_touch(false);
         Self {
             world: level.world,
             player: Player::new(spawn),
             enemies,
+            touch: crate::ui::TouchUi::new(),
+            paused: false,
+            mana: 100.0,
+            prev_dashing: false,
+            prev_on_ground: false,
             movers,
             spikes: level.spikes,
             checkpoints: level
@@ -267,10 +284,36 @@ impl Game {
             self.attack_edge = true;
         }
         self.attack_mouse_prev = mouse_atk;
+        // Пауза с клавиатуры.
+        if is_key_pressed(KeyCode::P) {
+            self.paused = !self.paused;
+        }
+        // Edge-нажатия с сенсорной панели.
+        if self.touch.take_jump_edge() {
+            self.jump_edge = true;
+        }
+        if self.touch.take_dash_edge() {
+            self.dash_edge = true;
+        }
+        if self.touch.take_attack_edge() {
+            self.attack_edge = true;
+        }
+        if self.touch.take_pause() {
+            self.paused = !self.paused;
+        }
     }
 
     /// Один фиксированный шаг симуляции (1/60 с).
     fn fixed_update(&mut self) {
+        // Пауза: симуляция стоит, нажатия сбрасываются.
+        if self.paused {
+            self.jump_edge = false;
+            self.dash_edge = false;
+            self.attack_edge = false;
+            self.touch.clear_edges();
+            return;
+        }
+
         // HITSTOP: мир замирает на ударе, частицы продолжают лететь.
         // Edge-нажатия при этом копятся и тратятся после разморозки.
         if self.hitstop > 0.0 {
@@ -287,8 +330,13 @@ impl Game {
         if is_key_down(KeyCode::D) || is_key_down(KeyCode::Right) {
             move_x += 1.0;
         }
-        let jump_held =
-            is_key_down(KeyCode::Space) || is_key_down(KeyCode::W) || is_key_down(KeyCode::Up);
+        let jump_held = is_key_down(KeyCode::Space)
+            || is_key_down(KeyCode::W)
+            || is_key_down(KeyCode::Up)
+            || self.touch.jump_held();
+
+        // Стик добавляется к клавишам и гасится в [-1, 1].
+        let move_x = (move_x + self.touch.axis_x()).clamp(-1.0, 1.0);
 
         let input = PlayerInput {
             move_x,
@@ -315,7 +363,24 @@ impl Game {
             };
         }
 
+        // Пыль приземления: падали быстро — подняли клубки у ног.
+        let fall_speed = self.player.vel.y;
         self.player.update(&input, &self.world, FIXED_DT);
+        if self.player.on_ground && !self.prev_on_ground && fall_speed > 320.0 {
+            self.particles.dust(
+                self.player.body().center() + Vec2::new(0.0, self.player.size.y * 0.5),
+                0.0,
+            );
+        }
+        self.prev_on_ground = self.player.on_ground;
+
+        // ---------- МАНА: тратится на рывок, копится со временем ----------
+        let dashing_now = self.player.is_dashing();
+        if dashing_now && !self.prev_dashing {
+            self.mana = (self.mana - 25.0).max(0.0);
+        }
+        self.prev_dashing = dashing_now;
+        self.mana = (self.mana + 14.0 * FIXED_DT).min(100.0);
 
         // ---------- ПЛАТФОРМЫ: выталкивание + езда сверху ----------
         self.on_mover = None;
@@ -479,6 +544,8 @@ impl Game {
         draw_spikes(&self.spikes);
         draw_checkpoints(&self.checkpoints, self.time);
         draw_movers(&self.movers, self.time);
+        draw_coins(&self.coins, self.time);
+        draw_mist(&self.cam_pos, &view, self.time);
         draw_torches(&self.torches, self.time);
         draw_motes(&self.cam_pos, &view, self.time);
         draw_enemies(&self.enemies, self.time);
@@ -488,6 +555,35 @@ impl Game {
         set_default_camera();
         draw_vignette();
         self.draw_hud(frame_dt);
+        self.touch.draw();
+        if self.paused {
+            let w = screen_width();
+            let h = screen_height();
+            draw_rectangle(0.0, 0.0, w, h, Color::new(0.02, 0.016, 0.014, 0.62));
+            draw_rectangle(
+                w * 0.5 - 150.0,
+                h * 0.5 - 52.0,
+                300.0,
+                104.0,
+                Color::new(0.05, 0.04, 0.035, 0.9),
+            );
+            draw_rectangle_lines(
+                w * 0.5 - 150.0,
+                h * 0.5 - 52.0,
+                300.0,
+                104.0,
+                2.0,
+                GOLD_DARK,
+            );
+            draw_text("PAUSED", w * 0.5 - 52.0, h * 0.5 - 8.0, 36.0, TEXT_MAIN);
+            draw_text(
+                "tap pause / press P to resume",
+                w * 0.5 - 108.0,
+                h * 0.5 + 26.0,
+                18.0,
+                TEXT_DIM,
+            );
+        }
     }
 
     fn draw_hud(&mut self, frame_dt: f32) {
@@ -559,6 +655,27 @@ impl Game {
             20.0,
             TEXT_MAIN,
         );
+
+        // --- мана: кристалл + сегментированная полоса (тратится на рывок) ---
+        let mx = 152.0;
+        let my = 84.0;
+        // Кристалл: гранёный камень с бликом.
+        draw_rectangle(mx - 4.0, my + 1.0, 8.0, 7.0, Color::new(0.30, 0.34, 0.40, 1.0));
+        draw_rectangle(mx - 2.5, my - 2.0, 5.0, 4.0, Color::new(0.30, 0.34, 0.40, 1.0));
+        draw_rectangle(mx - 3.0, my + 1.0, 6.0, 5.0, Color::new(0.62, 0.70, 0.78, 1.0));
+        draw_rectangle(mx - 1.5, my - 1.0, 3.0, 3.0, Color::new(0.62, 0.70, 0.78, 1.0));
+        draw_rectangle(mx - 2.0, my + 1.0, 1.5, 4.0, Color::new(0.88, 0.92, 0.95, 0.9));
+        // Рамка и заливка полосы.
+        let bw = 92.0;
+        draw_rectangle(mx + 7.0, my - 1.0, bw + 2.0, 8.0, OUTLINE);
+        draw_rectangle(mx + 8.0, my, bw, 6.0, Color::new(0.10, 0.09, 0.08, 0.9));
+        let frac = self.mana / 100.0;
+        draw_rectangle(mx + 8.0, my, bw * frac, 6.0, Color::new(0.62, 0.70, 0.78, 0.95));
+        draw_rectangle(mx + 8.0, my, bw * frac, 1.5, Color::new(0.85, 0.90, 0.94, 0.9));
+        // Сегменты.
+        for s in 1..5 {
+            draw_rectangle(mx + 8.0 + s as f32 * (bw / 5.0), my, 1.0, 6.0, Color::new(0.10, 0.09, 0.08, 0.85));
+        }
         // Шрифт по умолчанию в macroquad — только ASCII, поэтому HUD на латинице.
         draw_text(
             "A/D - move   SPACE - jump   SHIFT - dash   J/Z - attack",
@@ -699,6 +816,20 @@ fn draw_parallax(cam: &Vec2, view: &Vec2, time: f32) {
             draw_rectangle(x, cy, wcl, 9.0 + i as f32 * 2.0, Color::new(0.055, 0.048, 0.045, 0.26));
             draw_rectangle(x + wcl * 0.2, cy - 5.0, wcl * 0.5, 6.0, Color::new(0.055, 0.048, 0.045, 0.20));
         }
+    }
+
+    // --- птицы: редкая стая в вышине, машут крыльями ---
+    for i in 0..4 {
+        let speed = 9.0 + i as f32 * 3.0;
+        let span = view.x + 160.0;
+        let bx = left - 80.0 + ((time * speed + i as f32 * 173.0) % span);
+        let by = top + 40.0 + i as f32 * 16.0 + (time * 1.3 + i as f32).sin() * 8.0;
+        let flap = (time * 7.0 + i as f32 * 2.0).sin() * 2.5;
+        let c = Color::new(0.06, 0.05, 0.045, 0.8);
+        // Тело + два крыла-взмаха.
+        draw_rectangle(bx - 1.0, by, 2.0, 2.0, c);
+        draw_rectangle(bx - 5.0, by - flap, 4.0, 1.5, c);
+        draw_rectangle(bx + 1.5, by - flap, 4.0, 1.5, c);
     }
 
     // --- дальний план: еле различимый хребет за основным ---
@@ -1474,6 +1605,82 @@ fn draw_vignette() {
     draw_rectangle(14.0, 0.0, 16.0, h, edge);
     draw_rectangle(w - 14.0, 0.0, 14.0, h, deep);
     draw_rectangle(w - 30.0, 0.0, 16.0, h, edge);
+}
+
+/// Монеты: парят, «вращаются» (сжатие по X), блик на полном обороте.
+fn draw_coins(coins: &[Coin], time: f32) {
+    for coin in coins {
+        if coin.taken {
+            continue;
+        }
+        let bob = (time * 2.6 + coin.pos.x * 0.05).sin() * 3.0;
+        let x = coin.pos.x;
+        let y = coin.pos.y + bob;
+        // Иллюзия вращения: ширина дышит по синусу.
+        let spin = (time * 3.4 + coin.pos.x * 0.03).cos().abs();
+        let k = 0.30 + 0.70 * spin; // 0.3..1.0
+        // Тёплое гало.
+        draw_circle(x, y, 9.0, Color::new(0.769, 0.627, 0.290, 0.10));
+        // Округлый силуэт из трёх полос, сжатых по k.
+        let w_mid = 10.0 * k;
+        let w_end = 6.0 * k;
+        draw_rectangle(x - w_mid * 0.5 - 1.0, y - 7.0, w_mid + 2.0, 14.0, OUTLINE);
+        draw_rectangle(x - w_end * 0.5 - 1.0, y - 9.0, w_end + 2.0, 2.5, OUTLINE);
+        draw_rectangle(x - w_end * 0.5 - 1.0, y + 6.5, w_end + 2.0, 2.5, OUTLINE);
+        draw_rectangle(x - w_mid * 0.5, y - 6.0, w_mid, 12.0, GOLD);
+        draw_rectangle(x - w_end * 0.5, y - 8.0, w_end, 2.5, GOLD);
+        draw_rectangle(x - w_end * 0.5, y + 5.5, w_end, 2.5, GOLD);
+        // Тёмный обод и блик.
+        draw_rectangle(
+            x + w_mid * 0.5 - 1.5,
+            y - 5.0,
+            1.5,
+            10.0,
+            Color::new(0.55, 0.42, 0.16, 1.0),
+        );
+        draw_rectangle(
+            x - w_mid * 0.5 + 1.0,
+            y - 4.0,
+            (2.5 * k).max(1.0),
+            3.0,
+            Color::new(0.93, 0.83, 0.55, 1.0),
+        );
+        // Искра на «лицевой» стороне.
+        if spin > 0.86 {
+            draw_rectangle(
+                x + w_mid * 0.25,
+                y - 5.5,
+                1.5,
+                1.5,
+                Color::new(1.0, 0.97, 0.85, 0.9),
+            );
+        }
+    }
+}
+
+/// Стелющийся туман у пола: три полупрозрачных пласта с дрейфом.
+fn draw_mist(cam: &Vec2, view: &Vec2, time: f32) {
+    for i in 0..3 {
+        let y = HORIZON - 24.0 + i as f32 * 11.0;
+        let a = 0.035 + i as f32 * 0.020; // ниже — плотнее
+        let drift = (time * (5.0 + i as f32 * 2.3)).sin() * 30.0;
+        draw_rectangle(
+            cam.x - view.x * 0.5 - 40.0 + drift,
+            y,
+            view.x + 80.0,
+            9.0 + i as f32 * 3.0,
+            Color::new(FOG.r, FOG.g, FOG.b, a),
+        );
+        // Рваные клубы вторым слоем.
+        let drift2 = (time * (3.1 + i as f32 * 1.7) + 2.0).cos() * 44.0;
+        draw_rectangle(
+            cam.x - view.x * 0.5 + 60.0 + drift2,
+            y + 4.0,
+            view.x * 0.6,
+            6.0 + i as f32 * 2.0,
+            Color::new(FOG.r, FOG.g, FOG.b, a * 0.7),
+        );
+    }
 }
 
 /// Рыцарь: послойная пиксельная отрисовка — обводка силуэта, бевели

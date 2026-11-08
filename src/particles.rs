@@ -95,6 +95,33 @@ impl ParticlePool {
         }
     }
 
+    /// Пыль приземления: серо-бурые клубки, разлетаются у ног и оседают.
+    pub fn dust(&mut self, center: Vec2, dir: f32) {
+        for _ in 0..8 {
+            let a = self.rand();
+            let b = self.rand();
+            let c = self.rand();
+            let side = if a > 0.5 { 1.0 } else { -1.0 };
+            let angle = -1.35 + b * 1.5; // веер чуть вверх
+            let speed = 40.0 + c * 110.0;
+            let color = if a > 0.55 {
+                Color::new(0.47, 0.42, 0.35, 0.85)
+            } else {
+                Color::new(0.38, 0.34, 0.28, 0.85)
+            };
+            let life = 0.28 + b * 0.22;
+            self.spawn(Particle {
+                pos: center + Vec2::new(side * (2.0 + a * 6.0), 2.0),
+                vel: Vec2::new(dir * 30.0 + angle.cos() * speed * side, angle.sin() * speed),
+                life,
+                max_life: life,
+                size: 2.0 + a * 2.0,
+                color,
+                gravity: 300.0,
+            });
+        }
+    }
+
     /// Пиксельный взрыв смерти: цвета — палитра вида врага.
     pub fn death_burst(&mut self, center: Vec2, colors: &[Color]) {
         if colors.is_empty() {
@@ -193,6 +220,13 @@ mod tests {
         // Слоты вернулись в пул — повторный взрыв возможен.
         pool.hit_spark(Vec2::ZERO, 1.0);
         assert_eq!(pool.alive_count(), 10);
+    }
+
+    #[test]
+    fn dust_spawns_puffs() {
+        let mut pool = ParticlePool::new();
+        pool.dust(Vec2::new(10.0, 20.0), 1.0);
+        assert_eq!(pool.alive_count(), 8, "пыль приземления — 8 клубков");
     }
 
     #[test]
