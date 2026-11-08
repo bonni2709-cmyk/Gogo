@@ -415,13 +415,18 @@ fn build_level() -> Level {
     fill(&mut world, 60, 6, 4, 8);
 
     // Расстановка врагов (левый верхний угол хитбокса):
-    // два слизня на полу, скелет у правой стены, летучая мышь над ямой.
+    // два слизня на полу, летучая мышь над ямой, культист на платформе,
+    // скелет и некрорыцарь-босс у правой стены.
     let floor_top = 14.0 * TILE;
     let enemy_spawns = vec![
         (EnemyKind::Slime, Vec2::new(10.0 * TILE, floor_top - 20.0)),
         (EnemyKind::Slime, Vec2::new(36.0 * TILE, floor_top - 20.0)),
         (EnemyKind::Skeleton, Vec2::new(44.0 * TILE, floor_top - 38.0)),
         (EnemyKind::Bat, Vec2::new(21.5 * TILE, 9.0 * TILE)),
+        // Культист держит среднюю дистанцию на верхней платформе (y = 10*TILE).
+        (EnemyKind::Cultist, Vec2::new(14.0 * TILE, 10.0 * TILE - 34.0)),
+        // Босс — «босс-арена» у правой границы уровня.
+        (EnemyKind::DeathKnight, Vec2::new(52.0 * TILE, floor_top - 56.0)),
     ];
 
     Level {

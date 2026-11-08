@@ -8,10 +8,13 @@
 //! * агро-логику: дистанция + линия взгляда, «липкое» преследование;
 //! * контактный урон и уборку погибших (`hp == 0` → despawn).
 //!
-//! Поведение видов изолировано в модулях [`slime`], [`bat`], [`skeleton`].
+//! Поведение видов изолировано в модулях [`slime`], [`bat`], [`skeleton`],
+//! [`cultist`] (метатель ножей) и [`deathknight`] (босс-некрорыцарь).
 //! Боевое оружие игрока подключается позже через [`EnemyWorld::damage`].
 
 pub mod bat;
+pub mod cultist;
+pub mod deathknight;
 pub mod skeleton;
 pub mod slime;
 
@@ -32,6 +35,10 @@ pub enum EnemyKind {
     Slime,
     Bat,
     Skeleton,
+    /// Культист: держит дистанцию и метает ножи.
+    Cultist,
+    /// Некрорыцарь-босс: тяжёлые выпады и ярость ниже половины HP.
+    DeathKnight,
 }
 
 /// Состояния конечных автоматов врагов (общий набор для всех видов).
@@ -102,6 +109,24 @@ pub fn params(kind: EnemyKind) -> EnemyParams {
             aggro_range: 145.0,
             flying: false,
         },
+        EnemyKind::Cultist => EnemyParams {
+            size: Vec2::new(24.0, 34.0),
+            hp: 3,
+            contact_damage: 1,
+            patrol_speed: 50.0,
+            chase_speed: 95.0,
+            aggro_range: 210.0,
+            flying: false,
+        },
+        EnemyKind::DeathKnight => EnemyParams {
+            size: Vec2::new(40.0, 56.0),
+            hp: 24,
+            contact_damage: 2,
+            patrol_speed: 40.0,
+            chase_speed: 90.0,
+            aggro_range: 260.0,
+            flying: false,
+        },
     }
 }
 
@@ -121,6 +146,20 @@ pub(crate) mod timing {
     pub const HOP_COOLDOWN: f32 = 1.1;
     /// Сколько секунд без видимости враг продолжает преследование.
     pub const FORGET: f32 = 2.4;
+    /// Замах культиста перед броском ножа.
+    pub const THROW_WINDUP: f32 = 0.40;
+    /// Кадр броска.
+    pub const THROW_STRIKE: f32 = 0.10;
+    /// Откат после броска.
+    pub const THROW_RECOVER: f32 = 0.45;
+    /// Кулдаун следующего броска.
+    pub const THROW_COOLDOWN: f32 = 1.15;
+    /// Замах некрорыцаря (длиннее обычного скелета — босс читается).
+    pub const BOSS_WINDUP: f32 = 0.63;
+    /// Откат после выпада босса.
+    pub const BOSS_RECOVER: f32 = 0.66;
+    /// Кулдаун выпада босса.
+    pub const BOSS_COOLDOWN: f32 = 0.95;
 }
 
 /// Мозг врага: конечный автомат + «память» преследования.
@@ -144,6 +183,10 @@ pub struct EnemyBrain {
     pub on_ground: bool,
     /// Общий кулдаун способности (прыжок слизня, выпад скелета).
     pub cooldown: f32,
+    /// Запрошен ли бросок ножа (культист ставит флаг, [`EnemyWorld`] создаёт снаряд).
+    pub want_throw: bool,
+    /// Ярость босса (ниже половины HP): ускоренные фазы и более злые глаза.
+    pub enraged: bool,
 }
 
 impl EnemyBrain {
@@ -163,6 +206,8 @@ impl EnemyBrain {
             wobble: 0.0,
             on_ground: false,
             cooldown: 0.0,
+            want_throw: false,
+            enraged: false,
         }
     }
 
@@ -190,6 +235,26 @@ pub struct ContactHit {
     pub center: Vec2,
 }
 
+/// Летящий нож культиста (обычный снарядный объект без гравитации).
+#[derive(Clone, Copy, Debug)]
+pub struct Knife {
+    /// Верхний левый угол хитбокса 6×4 в мировых единицах.
+    pub pos: Vec2,
+    pub vel: Vec2,
+    /// Остаток жизни, с.
+    pub life: f32,
+    /// Владелец (для attribution контакта).
+    pub owner: Entity,
+    pub damage: u32,
+}
+
+impl Knife {
+    /// Хитбокс снаряда.
+    pub fn body(&self) -> Aabb {
+        Aabb::new(self.pos.x, self.pos.y, 6.0, 4.0)
+    }
+}
+
 /// Результат одного шага симуляции врагов.
 #[derive(Default)]
 pub struct EnemyUpdate {
@@ -210,6 +275,8 @@ pub struct EnemyWorld {
     pub(crate) velocities: ComponentStore<Velocity>,
     pub(crate) healths: ComponentStore<Health>,
     pub(crate) brains: ComponentStore<EnemyBrain>,
+    /// Летящие ножи культистов (обычный Vec — снарядов мало, пул избыточен).
+    knives: Vec<Knife>,
 }
 
 impl EnemyWorld {
@@ -220,6 +287,7 @@ impl EnemyWorld {
             velocities: ComponentStore::new(),
             healths: ComponentStore::new(),
             brains: ComponentStore::new(),
+            knives: Vec::new(),
         }
     }
 
@@ -342,11 +410,44 @@ impl EnemyWorld {
                 los,
             };
 
+            // --- ярость босса: ниже половины максимума HP ---
+            if brain.kind == EnemyKind::DeathKnight
+                && !brain.enraged
+                && health.hp * 2 <= p.hp
+            {
+                brain.enraged = true;
+            }
+
             // --- FSM конкретного вида ---
             match brain.kind {
                 EnemyKind::Slime => slime::update(brain, transform, vel, world, &info, dt),
                 EnemyKind::Bat => bat::update(brain, transform, vel, world, &info, dt),
                 EnemyKind::Skeleton => skeleton::update(brain, transform, vel, world, &info, dt),
+                EnemyKind::Cultist => cultist::update(brain, transform, vel, world, &info, dt),
+                EnemyKind::DeathKnight => {
+                    deathknight::update(brain, transform, vel, world, &info, dt)
+                }
+            }
+
+            // --- бросок культиста: флаг FSM → снаряд в мире ---
+            if brain.want_throw {
+                brain.want_throw = false;
+                let dir = if transform.facing != 0.0 {
+                    transform.facing
+                } else {
+                    brain.dir
+                };
+                let c = transform.center();
+                self.knives.push(Knife {
+                    pos: Vec2::new(
+                        c.x + dir * (transform.size.x * 0.5 + 3.0),
+                        c.y - 6.0,
+                    ),
+                    vel: Vec2::new(dir * 265.0, -12.0),
+                    life: 2.4,
+                    owner: entity,
+                    damage: 1,
+                });
             }
 
             // --- физика ---
@@ -396,6 +497,41 @@ impl EnemyWorld {
             }
         }
 
+        // --- полёт ножей: столкновение со стеной и игроком ---
+        let mut i = 0;
+        while i < self.knives.len() {
+            let knife = self.knives[i];
+            let mut remove = knife.life <= 0.0;
+            if !remove {
+                let next = knife.pos + knife.vel * dt;
+                let swept = Aabb::new(
+                    knife.pos.x.min(next.x) - 1.0,
+                    knife.pos.y.min(next.y) - 1.0,
+                    (next.x - knife.pos.x).abs() + 8.0,
+                    (next.y - knife.pos.y).abs() + 6.0,
+                );
+                if world.overlaps_any(swept) {
+                    remove = true;
+                } else {
+                    self.knives[i].pos = next;
+                    self.knives[i].life -= dt;
+                    if self.knives[i].body().overlaps(&p_body) {
+                        hits.push(ContactHit {
+                            entity: knife.owner,
+                            damage: knife.damage,
+                            center: self.knives[i].pos,
+                        });
+                        remove = true;
+                    }
+                }
+            }
+            if remove {
+                self.knives.swap_remove(i);
+            } else {
+                i += 1;
+            }
+        }
+
         for entity in dead {
             self.despawn(entity);
         }
@@ -403,6 +539,11 @@ impl EnemyWorld {
             contacts: hits,
             deaths,
         }
+    }
+
+    /// Летящие ножи (для отрисовки).
+    pub fn knives(&self) -> &[Knife] {
+        &self.knives
     }
 
     /// Обход живых врагов (для отрисовки и будущей боевой системы).
@@ -516,6 +657,20 @@ pub(crate) mod palette {
     pub const SHADOW: Color = Color::new(0.0, 0.0, 0.0, 0.35);
     /// Обводка силуэтов (почти чёрный тёплый).
     pub const OUTLINE: Color = Color::new(0.055, 0.047, 0.039, 1.0);
+    /// Роба культиста — тёмный марун (выцветшая ткань культа).
+    pub const CULTIST_ROBE: Color = Color::new(0.361, 0.173, 0.145, 1.0);
+    pub const CULTIST_DARK: Color = Color::new(0.208, 0.098, 0.086, 1.0);
+    /// Костяная маска под капюшоном.
+    pub const CULTIST_MASK: Color = Color::new(0.722, 0.678, 0.573, 1.0);
+    /// Пластины некрорыцаря — холодная притушенная сталь.
+    pub const BOSS_PLATE: Color = Color::new(0.318, 0.306, 0.337, 1.0);
+    pub const BOSS_PLATE_DARK: Color = Color::new(0.192, 0.184, 0.208, 1.0);
+    /// Выцветший тёмно-красный плащ босса.
+    pub const BOSS_CAPE: Color = Color::new(0.322, 0.145, 0.118, 1.0);
+    /// Тлеющие глаза-угольки.
+    pub const BOSS_EYE: Color = Color::new(0.851, 0.420, 0.176, 1.0);
+    /// Тусклое золото (пряжки, заклёпки).
+    pub const GOLD: Color = Color::new(0.710, 0.553, 0.263, 1.0);
 }
 
 /// Цвета «пиксельного взрыва» при смерти вида.
@@ -525,16 +680,41 @@ pub fn death_palette(kind: EnemyKind) -> [Color; 4] {
         EnemyKind::Slime => [SLIME, SLIME_BELLY, SLIME_DARK, SLIME_GLOSS],
         EnemyKind::Bat => [BAT, BAT_WING, BAT_FUR, TATTER],
         EnemyKind::Skeleton => [BONE, BONE_DARK, STEEL, RUST],
+        EnemyKind::Cultist => [CULTIST_ROBE, CULTIST_DARK, CULTIST_MASK, STEEL],
+        EnemyKind::DeathKnight => [BOSS_PLATE, BOSS_CAPE, BONE, BOSS_EYE],
     }
 }
 
 /// Отрисовать всех живых врагов (в детерминированном порядке).
 pub fn draw_enemies(enemies: &EnemyWorld, time: f32) {
+    // Ножи — под телами (снаряд летит по земле/на уровне пояса).
+    for knife in enemies.knives() {
+        let c = knife.body().center();
+        let dir = knife.vel.x.signum();
+        let tip_x = c.x + dir * 4.0;
+        let tail_x = c.x - dir * 4.0;
+        // Обводка и сталь клинка.
+        macroquad::shapes::draw_line(tail_x, c.y, tip_x, c.y, 4.0, palette::OUTLINE);
+        macroquad::shapes::draw_line(tail_x, c.y, tip_x, c.y, 2.0, palette::STEEL);
+        // Рукоять сзади.
+        macroquad::shapes::draw_rectangle(
+            tail_x - dir * 2.0 - 1.0,
+            c.y - 2.0,
+            3.0,
+            4.0,
+            palette::TATTER,
+        );
+        // Блик острия.
+        macroquad::shapes::draw_rectangle(tip_x - 1.0, c.y - 1.0, 2.0, 1.0, palette::STEEL);
+    }
+
     for (_entity, transform, brain, health) in enemies.iter() {
         match brain.kind {
             EnemyKind::Slime => slime::draw(transform, brain, health, time),
             EnemyKind::Bat => bat::draw(transform, brain, health, time),
             EnemyKind::Skeleton => skeleton::draw(transform, brain, health, time),
+            EnemyKind::Cultist => cultist::draw(transform, brain, health, time),
+            EnemyKind::DeathKnight => deathknight::draw(transform, brain, health, time),
         }
     }
 }
@@ -736,5 +916,69 @@ mod tests {
         );
         assert!(after.x <= start_x + 40.0, "патруль держится у обрыва");
         assert!(enemies.is_alive(slime));
+    }
+
+    /// Культист в полосе броска: агро → замах → ножлетит в игрока.
+    #[test]
+    fn cultist_throws_knife_at_range() {
+        let (world, spawn) = flat_world(400.0);
+        let mut enemies = EnemyWorld::new();
+        let cultist = enemies.spawn(EnemyKind::Cultist, Vec2::new(0.0, spawn.y - 6.0));
+        let player = Player::new(Vec2::new(160.0, spawn.y));
+
+        let mut knife_seen = false;
+        let mut knife_hit = false;
+        for _ in 0..360 {
+            let step = enemies.update(&world, &player, crate::physics::FIXED_DT);
+            if !enemies.knives().is_empty() {
+                knife_seen = true;
+            }
+            if !step.contacts.is_empty() {
+                knife_hit = true;
+                break;
+            }
+        }
+        assert!(knife_seen, "культист должен выбросить нож");
+        assert!(knife_hit, "нож должен долететь до игрока");
+        assert!(enemies.is_alive(cultist), "бросок не должен вредить самому себе");
+    }
+
+    /// Вблизи игрока культист отступает, а не лезет в упор.
+    #[test]
+    fn cultist_retreats_when_player_close() {
+        let (world, spawn) = flat_world(400.0);
+        let mut enemies = EnemyWorld::new();
+        let start_x = -50.0;
+        let cultist = enemies.spawn(EnemyKind::Cultist, Vec2::new(start_x, spawn.y - 6.0));
+        let player = Player::new(Vec2::new(30.0, spawn.y));
+
+        for _ in 0..60 {
+            enemies.update(&world, &player, crate::physics::FIXED_DT);
+        }
+        let t = enemies.transforms.get(cultist).unwrap();
+        assert!(
+            t.pos.x < start_x - 10.0,
+            "культист обязан отступать от близкого игрока (x={})",
+            t.pos.x
+        );
+    }
+
+    /// Босс впадает в ярость ниже половины HP.
+    #[test]
+    fn deathknight_enrages_below_half_hp() {
+        let (world, spawn) = flat_world(400.0);
+        let mut enemies = EnemyWorld::new();
+        let boss = enemies.spawn(EnemyKind::DeathKnight, Vec2::new(0.0, spawn.y - 16.0));
+        let player = Player::new(Vec2::new(300.0, spawn.y));
+
+        let p = params(EnemyKind::DeathKnight);
+        assert_eq!(p.hp, 24, "у босса24 HP");
+        assert_eq!(p.contact_damage, 2, "контакт босса бьёт вдвойне");
+
+        // 24 → 11 HP: ниже половины.
+        assert!(enemies.damage(boss, 13, 1.0));
+        enemies.update(&world, &player, crate::physics::FIXED_DT);
+        let brain = enemies.brains.get(boss).unwrap();
+        assert!(brain.enraged, "ниже половины HP должна включиться ярость");
     }
 }
