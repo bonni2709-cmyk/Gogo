@@ -4,12 +4,12 @@ Rust + Slint, Windows / Android. **Preview: сетевое ядро, поиск,
 
 ## Скачать проверенную CI-сборку
 
-Исходники бинарников: `1941ea2bd3964d00f5d5df40df008942945fd950`.
-[Успешный workflow 42395024107](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42395024107):
+Исходники бинарников: `ca2c2ebd8d119e60499c7932d40a5fd751774afe`.
+[Успешный workflow 42461067070](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42461067070):
 
-- [Windows x64 — ZIP с lumen-desktop.exe](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42395024107/artifacts/13583401796) (~4.9 MB).
-- [Android arm64 — ZIP с preview APK](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42395024107/artifacts/13583451855) (~14.2 MB).
-- [Отформатированные исходники и Cargo.lock](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42395024107/artifacts/13582582661).
+- [Windows x64 — ZIP с lumen-desktop.exe](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42461067070/artifacts/13610160458) (~4.9 MB).
+- [Android arm64 — ZIP с preview APK](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42461067070/artifacts/13610260643) (~14.3 MB).
+- [Отформатированные исходники и Cargo.lock](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42461067070/artifacts/13610235176).
 
 Для скачивания Actions artifacts может потребоваться вход в GitHub; у артефактов ограниченный срок хранения. Это ссылки на CI-артефакты, не постоянные GitHub Releases. Android APK подписан отладочным ключом и требует Android 8+ / arm64. EXE не имеет подписи издателя. NativeActivity и Media3 проверены в x86_64/API 35 эмуляторе на локальном тестовом MP4. **Это не проверка физического устройства, YouTube, DPI или production Rust→CDN пути.**
 
@@ -27,13 +27,13 @@ Rust + Slint, Windows / Android. **Preview: сетевое ядро, поиск,
 
 ## Реализовано
 
-При открытии приложения самотестирование запускается автоматически, без ручных сетевых параметров. После ошибки кнопка позволяет повторить проверку. По очереди проверяются:
+При открытии приложения самотестирование запускается автоматически, без ручных сетевых параметров. При сетевой ошибке повторная проверка планируется автоматически с backoff; ручная настройка транспорта не требуется. По очереди проверяются:
 
 1. Прямое соединение.
 2. Разбиение первой TLS handshake record на записи по 32 байта с задержкой 5 мс.
 3. Разбиение по 8 байт с задержкой 10 мс.
 
-Принимается первый вариант, успешно выполнивший TLS + HTTP HEAD для `www.youtube.com` и `i.ytimg.com`. Используется настоящий hostname/SNI и проверка сертификата через rustls/webpki-roots. Проверка каждого endpoint ограничена 12 секундами. При полном отказе возвращается ошибка, прокси не запускается. Нет подмены сертификатов или MITM.
+Принимается первый вариант, успешно выполнивший TLS + HTTP HEAD для `www.youtube.com` и `i.ytimg.com`. Используется настоящий hostname/SNI и проверка сертификата через rustls/webpki-roots. Проверка каждого endpoint ограничена 12 секундами. При полном отказе новых upstream-соединений нет: локальный listener остаётся на своём порту, но не принимает ни одну стратегию до успешной повторной проверки. Нет подмены сертификатов или MITM.
 
 После успеха UI показывает выбранную стратегию и динамический loopback-порт. Один порт распознаёт SOCKS5 (только domain CONNECT/no-auth) и HTTP/1.1 CONNECT. Разрешены только YouTube-домены из списка в `lumen-core`, порт 443. Установлены ограничения заголовка, параллельных соединений и времени handshake. Обычный HTTP forwarding, UDP ASSOCIATE и аутентификация не поддерживаются. Другие процессы на устройстве могут обращаться к loopback-прокси; это не граница безопасности между локальными приложениями. DNS разрешается один раз перед соединением: пустые ответы и наборы с локальными, частными или специальными IP отклоняются целиком. Соединение использует только проверенные адреса без повторного DNS lookup; фильтр консервативный, а не полный реестр IANA.
 
@@ -44,7 +44,7 @@ Rust + Slint, Windows / Android. **Preview: сетевое ядро, поиск,
 - Fake SNI, raw TCP sequence injection, TTL tricks и их автоматическое тестирование.
 - Код ZeroDPI / sni-spoofing-rust не заимствован и совместимость с ними не заявляется. Обозначения `[reference:N]` в исходном задании не содержали URL.
 - Обход настоящего IP allowlist: изменение ClientHello не делает недоступный IP доступным. Отдельный разрешённый relay/tunnel мог бы потребоваться, но не входит в эту версию.
-- Проверка всех CDN/googlevideo, адаптация к смене сети, кэширование стратегий и автоматическое переключение после отказа активного транспорта.
+- Проверка всех CDN/googlevideo, системные события смены сети и сохранение стратегий между запусками. Повторный подбор после наблюдаемых транспортных ошибок уже реализован, но не гарантирует непрерывное воспроизведение.
 - Официальный YouTube API, история, подписки, полноценный media resolver (cipher/n/DASH/live/DRM). Media3 playback для поддержанных progressive MP4 уже реализован. Ограниченный resolver progressive MP4 описан ниже. Поиск metadata реализован через неофициальную HTML-схему, которая может измениться.
 - Android VpnService, TUN forwarding и `protect()` для исключения прокси-сокетов из VPN. Media3/ExoPlayer и JNI lifecycle bridge реализованы отдельным этапом.
 - mpv и внешние плеерные бинарники не используются. Windows WebView2 backend реализован; он требует установленного WebView2 Runtime. На Android Gradle APK включает Media3 backend; legacy cargo-apk вариант — только диагностику.
@@ -215,4 +215,15 @@ Reqwest connection/request/timeout/body errors поиска, подготовк�
 
 Ограничения: это восстановление транспорта по наблюдаемым ошибкам, **не системный монитор смены Wi-Fi/mobile**. Рабочий старый TCP/TLS pool не закрывается принудительно; новые соединения получают новую стратегию. Запрос поиска не повторяется автоматически, неудавшийся player не открывается заново, позиция видео и signed URL не восстанавливаются автоматически. Если CDN недоступен, а HEAD-пробы YouTube/thumbnail успешны, выбор стратегии всё ещё не доказывает доступность конкретного CDN. Ошибки локального bind или завершение proxy service являются отдельными фатальными ошибками worker, а не бесконечно повторяемой сетевой проверкой.
 
-Добавлены offline-тесты backoff/cooldown, обновления стратегии, запрета соединений при recovery, стабильного listener и завершения незаконченных handshake при остановке proxy. TLS integration fixtures проверяют, что обрыв body сигнализирует recovery, а HTTP/schema/range errors и намеренная отмена — нет. Новые проверки требуют подтверждения CI.
+Добавлены offline-тесты backoff/cooldown, обновления стратегии, запрета соединений при recovery, стабильного listener и завершения незаконченных handshake при остановке proxy. TLS integration fixtures проверяют, что обрыв body сигнализирует recovery, а HTTP/schema/range errors и намеренная отмена — нет. Новые проверки подтверждены CI 42461067070; результаты ниже.
+
+
+### Подтверждённая сборка automatic recovery
+
+- [Основной CI 42461067070 — success](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42461067070): **41 Rust-тест**, Clippy, Slint type-check, JVM test/Android lint, Windows EXE и Android arm64 APK.
+- [Android regression smoke 42461067065 — success](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42461067065): NativeActivity и локальный Media3 playback/seek/stop/resume.
+- [Smoke reports и logcat](https://github.com/bonni2709-cmyk/Gogo/actions/runs/42461067065/artifacts/13609822286).
+
+Первый прогон нового набора выявил пропущенное уведомление о truncated body: reqwest может классифицировать такую ошибку как decode, а не body. Исправлено на уровне чтения тела: transport errors и premature EOF с оставшимися ожидаемыми байтами уведомляют recovery controller независимо от категории reqwest. Проверка не была ослаблена.
+
+Backoff/state/notifications проверены локальными Rust-тестами; Android smoke по-прежнему не имитирует смену реальной Wi-Fi/mobile сети и не проверяет восстановление YouTube playback после такого перехода. Физические устройства и конкретные DPI-сети остаются непроверенными.
