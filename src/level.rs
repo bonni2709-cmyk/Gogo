@@ -32,6 +32,8 @@ pub struct LevelData {
     pub torches: Vec<(f32, f32)>,
     /// Декор-тайлы: (tx, ty, вид).
     pub decor: Vec<(i32, i32, Decor)>,
+    /// Дверь-выход (основание): касание → следующий уровень.
+    pub exit: Option<Vec2>,
 }
 
 /// Вид декор-тайла (GID в слое `decor`).
@@ -171,6 +173,7 @@ pub fn parse(json: &str) -> LevelData {
     let mut checkpoints = Vec::new();
     let mut coins = Vec::new();
     let mut torches = Vec::new();
+    let mut exit = None;
 
     for layer in &map.layers {
         match layer {
@@ -266,6 +269,7 @@ pub fn parse(json: &str) -> LevelData {
                             o.y + if o.height > 0.0 { o.height * 0.5 } else { 0.0 },
                         )),
                         "torch" => torches.push((o.x, o.y)),
+                        "exit" => exit = Some(Vec2::new(o.x, o.y)),
                         _ => {}
                     }
                 }
@@ -284,12 +288,23 @@ pub fn parse(json: &str) -> LevelData {
         coins,
         torches,
         decor,
+        exit,
     }
 }
 
-/// Уровень 1: «Тропа пепла» — вкомпилирован в бинарник.
-pub fn load_level1() -> LevelData {
-    parse(include_str!("../assets/level1.json"))
+/// Все уровни игры, вкомпилированные в бинарник.
+const LEVELS: [&str; 2] = [
+    include_str!("../assets/level1.json"),
+    include_str!("../assets/level2.json"),
+];
+
+/// Загрузить уровень по индексу (0 — «Тропа пепла», 1 — «Катакомбы»).
+pub fn load_level(index: usize) -> LevelData {
+    parse(
+        LEVELS
+            .get(index)
+            .unwrap_or_else(|| panic!("level: нет уровня с индексом {index}")),
+    )
 }
 
 #[cfg(test)]
@@ -320,6 +335,37 @@ mod tests {
         assert_eq!(lvl.coins.len(), 9, "девять монет");
         assert_eq!(lvl.torches.len(), 7, "семь факелов");
         assert!(lvl.decor.len() >= 16, "декор на месте");
+        assert_eq!(lvl.exit, Some(Vec2::new(2976.0, 448.0)), "дверь у правой стены");
+    }
+
+    #[test]
+    fn level2_catacombs_parse_with_expected_content() {
+        let lvl = load_level(1);
+        assert_eq!(lvl.spawn.x, 96.0);
+        assert_eq!(lvl.enemy_spawns.len(), 9, "9 врагов во втором уровне");
+        let bosses = lvl
+            .enemy_spawns
+            .iter()
+            .filter(|(k, _)| matches!(k, EnemyKind::DeathKnight))
+            .count();
+        assert_eq!(bosses, 1, "финальный босс на арене");
+        let crushers = lvl.movers.iter().filter(|m| m.crusher).count();
+        assert_eq!(crushers, 2, "два крушителя в нижнем коридоре");
+        assert!((lvl.movers[0].range - 90.0).abs() < 0.01);
+        assert!((lvl.movers[1].phase - 0.5).abs() < 0.01, "крушители в противофазе");
+        assert_eq!(lvl.spikes.len(), 2, "шипы в разломе и коридоре");
+        assert_eq!(lvl.checkpoints.len(), 2, "зал и предарена");
+        assert_eq!(lvl.coins.len(), 13, "13 монет, включая секретку");
+        assert_eq!(lvl.torches.len(), 5);
+        assert!(lvl.exit.is_none(), "финал второго уровня — победа, без двери");
+        // Верхний ярус: пол на y = 8*TILE.
+        assert!(lvl
+            .world
+            .overlaps_any(Aabb::new(50.0 * 32.0, 8.0 * 32.0 + 8.0, 4.0, 4.0)));
+        // Дыра в пол над секретной полостью — воздух.
+        assert!(!lvl
+            .world
+            .overlaps_any(Aabb::new(21.5 * 32.0, 14.0 * 32.0 + 8.0, 4.0, 4.0)));
     }
 
     #[test]

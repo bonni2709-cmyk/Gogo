@@ -184,6 +184,14 @@ struct Coin {
     taken: bool,
 }
 
+/// Куда идём после затемнения экрана.
+enum Transition {
+    /// Загрузить уровень по индексу.
+    ToLevel(usize),
+    /// Начать игру заново.
+    Restart,
+}
+
 struct Game {
     world: World,
     player: Player,
@@ -207,6 +215,18 @@ struct Game {
     swing_hits: Vec<crate::ecs::Entity>,
     /// Номер свинга, обработанный в `swing_hits`.
     last_swing: u32,
+    // --- уровни: индекс, дверь-выход, переходы, победа ---
+    level_index: usize,
+    /// Основание двери-выхода (если уровень её имеет).
+    exit_pos: Option<Vec2>,
+    /// Затемнение 0..1 и направление (1 — гаснем, -1 — проявляемся).
+    fade: f32,
+    fade_dir: f32,
+    queued: Option<Transition>,
+    /// Момент убийства финального босса (экран победы).
+    victory_at: Option<f32>,
+    /// Смертей с начала забега.
+    deaths: u32,
     // --- сенсорное управление и пауза ---
     touch: crate::ui::TouchUi,
     /// Пауза: симуляция стоит, мир рисуется под затемнением.
@@ -234,43 +254,35 @@ struct Game {
 
 impl Game {
     fn new() -> Self {
-        let level = crate::level::load_level1();
-        let mut enemies = EnemyWorld::new();
-        for (kind, pos) in &level.enemy_spawns {
-            enemies.spawn(*kind, *pos);
-        }
-        let spawn = level.spawn;
-        let movers = level.movers.iter().map(Mover::new).collect();
         // Тачи не должны синтезировать клики мыши — иначе каждое касание
         // кнопки выстреливало бы атакой.
         simulate_mouse_with_touch(false);
-        Self {
-            world: level.world,
-            player: Player::new(spawn),
-            enemies,
+        let mut game = Self {
+            world: World::new(),
+            player: Player::new(Vec2::ZERO),
+            enemies: EnemyWorld::new(),
             touch: crate::ui::TouchUi::new(),
             paused: false,
             mana: 100.0,
             prev_dashing: false,
             prev_on_ground: false,
-            movers,
-            spikes: level.spikes,
-            checkpoints: level
-                .checkpoints
-                .iter()
-                .map(|p| Checkpoint { pos: *p, lit: false })
-                .collect(),
-            coins: level
-                .coins
-                .iter()
-                .map(|p| Coin { pos: *p, taken: false })
-                .collect(),
-            decor: level.decor,
-            torches: level.torches,
+            movers: Vec::new(),
+            spikes: Vec::new(),
+            checkpoints: Vec::new(),
+            coins: Vec::new(),
+            decor: Vec::new(),
+            torches: Vec::new(),
             gold: 0,
-            respawn_point: spawn,
+            respawn_point: Vec2::ZERO,
             on_mover: None,
-            cam_pos: spawn + Vec2::new(0.0, -40.0),
+            level_index: 0,
+            exit_pos: None,
+            fade: 1.0,
+            fade_dir: -1.0,
+            queued: None,
+            victory_at: None,
+            deaths: 0,
+            cam_pos: Vec2::new(120.0, 300.0),
             time: 0.0,
             fps_smooth: 60.0,
             jump_edge: false,
@@ -281,7 +293,45 @@ impl Game {
             hitstop: 0.0,
             swing_hits: Vec::new(),
             last_swing: 0,
+        };
+        game.load_level(0);
+        game
+    }
+
+    /// (Пере)загрузка уровня: мир, враги, ловушки, золото, чекпоинты.
+    fn load_level(&mut self, index: usize) {
+        let level = crate::level::load_level(index);
+        let mut enemies = EnemyWorld::new();
+        for (kind, pos) in &level.enemy_spawns {
+            enemies.spawn(*kind, *pos);
         }
+        self.world = level.world;
+        self.player = Player::new(level.spawn);
+        self.enemies = enemies;
+        self.movers = level.movers.iter().map(Mover::new).collect();
+        self.spikes = level.spikes;
+        self.checkpoints = level
+            .checkpoints
+            .iter()
+            .map(|p| Checkpoint { pos: *p, lit: false })
+            .collect();
+        self.coins = level
+            .coins
+            .iter()
+            .map(|p| Coin { pos: *p, taken: false })
+            .collect();
+        self.decor = level.decor;
+        self.torches = level.torches;
+        self.respawn_point = level.spawn;
+        self.exit_pos = level.exit;
+        self.level_index = index;
+        self.on_mover = None;
+        self.victory_at = None;
+        self.queued = None;
+        self.cam_pos = level.spawn + Vec2::new(0.0, -40.0);
+        // Начинаем с чёрного кадра и проявляемся.
+        self.fade = 1.0;
+        self.fade_dir = -1.0;
     }
 
     /// Захват edge-нажатий с клавиатуры (вызывается каждый кадр отрисовки).
@@ -325,6 +375,28 @@ impl Game {
 
     /// Один фиксированный шаг симуляции (1/60 с).
     fn fixed_update(&mut self) {
+        // ---------- ПЕРЕХОДЫ: затемнение → загрузка → проявление ----------
+        if self.fade_dir != 0.0 {
+            self.fade += self.fade_dir * FIXED_DT * 2.6;
+            if self.fade >= 1.0 && self.fade_dir > 0.0 {
+                self.fade = 1.0;
+                self.fade_dir = -1.0;
+                if let Some(t) = self.queued.take() {
+                    match t {
+                        Transition::ToLevel(i) => self.load_level(i),
+                        Transition::Restart => {
+                            self.gold = 0;
+                            self.deaths = 0;
+                            self.load_level(0);
+                        }
+                    }
+                }
+            } else if self.fade <= 0.0 {
+                self.fade = 0.0;
+                self.fade_dir = 0.0;
+            }
+        }
+
         // Пауза: симуляция стоит, нажатия сбрасываются.
         if self.paused {
             self.jump_edge = false;
@@ -486,6 +558,11 @@ impl Game {
         for (pos, kind) in step.deaths {
             self.particles.death_burst(pos, &death_palette(kind));
             self.hitstop = self.hitstop.max(0.05);
+            // Финальный босс пал — победа (титры после короткой паузы).
+            if self.level_index == 1 && matches!(kind, EnemyKind::DeathKnight) {
+                self.victory_at = Some(self.time);
+                self.hitstop = self.hitstop.max(0.12);
+            }
         }
 
         // Контактные попадания врагов в игрока (у игрока свои i-frames).
@@ -497,6 +574,19 @@ impl Game {
                 1.0
             };
             self.player.take_damage(hit.damage, knock_dir);
+        }
+
+        // ---------- ДВЕРЬ-ВЫХОД: следующий уровень ----------
+        if let Some(exit) = self.exit_pos {
+            if self.fade_dir == 0.0
+                && self
+                    .player
+                    .body()
+                    .overlaps(&Aabb::new(exit.x - 14.0, exit.y - 64.0, 28.0, 64.0))
+            {
+                self.queued = Some(Transition::ToLevel(self.level_index + 1));
+                self.fade_dir = 1.0;
+            }
         }
 
         // ---------- ЛОВУШКИ: шипы ----------
@@ -545,6 +635,20 @@ impl Game {
         // Падение в пустоту или смерть — возврат на чекпоинт с полным HP.
         if self.player.pos.y > VOID_Y || self.player.hp == 0 {
             self.player.respawn(self.respawn_point);
+            self.deaths += 1;
+        }
+
+        // Победа: через паузу любой удар/прыжок/рывок — забег заново.
+        if let Some(t0) = self.victory_at {
+            if self.time - t0 > 1.2
+                && (self.attack_edge || self.jump_edge || self.dash_edge)
+            {
+                self.attack_edge = false;
+                self.jump_edge = false;
+                self.dash_edge = false;
+                self.queued = Some(Transition::Restart);
+                self.fade_dir = 1.0;
+            }
         }
     }
 
@@ -575,6 +679,7 @@ impl Game {
         draw_decor(&self.decor, self.time);
         draw_spikes(&self.spikes);
         draw_checkpoints(&self.checkpoints, self.time);
+        draw_exit_door(self.exit_pos, self.time);
         draw_movers(&self.movers, self.time);
         draw_coins(&self.coins, self.time);
         draw_mist(&self.cam_pos, &view, self.time);
@@ -588,6 +693,61 @@ impl Game {
         draw_vignette();
         self.draw_hud(frame_dt);
         self.touch.draw();
+
+        // Затемнение перехода между уровнями.
+        if self.fade > 0.0 {
+            draw_rectangle(
+                0.0,
+                0.0,
+                screen_width(),
+                screen_height(),
+                Color::new(0.02, 0.016, 0.014, self.fade),
+            );
+        }
+
+        // Экран победы: панель со статистикой забега.
+        if let Some(t0) = self.victory_at {
+            if self.time - t0 > 1.2 {
+                let w = screen_width();
+                let h = screen_height();
+                let a = ((self.time - t0 - 1.2) * 2.0).min(0.72);
+                draw_rectangle(0.0, 0.0, w, h, Color::new(0.02, 0.016, 0.014, a));
+                let px = (w * 0.5 - 170.0).max(12.0);
+                let py = (h * 0.5 - 96.0).max(12.0);
+                draw_rectangle(px, py, 340.0, 192.0, Color::new(0.05, 0.04, 0.035, 0.95));
+                draw_rectangle_lines(px, py, 340.0, 192.0, 2.0, GOLD);
+                draw_rectangle_lines(px + 4.0, py + 4.0, 332.0, 184.0, 1.0, GOLD_DARK);
+                draw_text("VICTORY!", px + 112.0, py + 44.0, 40.0, GOLD);
+                draw_rectangle(px + 40.0, py + 56.0, 260.0, 2.0, GOLD_DARK);
+                draw_rectangle(px + 167.0, py + 54.0, 6.0, 5.0, GOLD);
+                let total = self.time as u32;
+                draw_text(
+                    &format!("TIME  {}:{:02}", total / 60, total % 60),
+                    px + 40.0,
+                    py + 88.0,
+                    20.0,
+                    TEXT_MAIN,
+                );
+                draw_text(
+                    &format!("GOLD  {}", self.gold),
+                    px + 40.0,
+                    py + 114.0,
+                    20.0,
+                    TEXT_MAIN,
+                );
+                draw_text(
+                    &format!("DEATHS  {}", self.deaths),
+                    px + 40.0,
+                    py + 140.0,
+                    20.0,
+                    TEXT_MAIN,
+                );
+                if ((self.time * 2.0) as i32) % 2 == 0 {
+                    draw_text("press attack to play again", px + 62.0, py + 176.0, 18.0, TEXT_DIM);
+                }
+            }
+        }
+
         if self.paused {
             let w = screen_width();
             let h = screen_height();
@@ -1860,6 +2020,52 @@ fn draw_mist(cam: &Vec2, view: &Vec2, time: f32) {
             Color::new(FOG.r, FOG.g, FOG.b, a * 0.7),
         );
     }
+}
+
+/// Дверь-выход: каменная арка с тёмным проёмом и пульсирующей руной.
+fn draw_exit_door(exit: Option<Vec2>, time: f32) {
+    let Some(e) = exit else { return };
+    let x = e.x - 16.0;
+    let base_y = e.y;
+    let w = 32.0;
+    let h = 64.0;
+    // Проём с обводкой.
+    draw_rectangle(x - 2.0, base_y - h - 2.0, w + 4.0, h + 4.0, OUTLINE);
+    draw_rectangle(x, base_y - h, w, h, Color::new(0.07, 0.06, 0.055, 1.0));
+    draw_rectangle(x, base_y - h, w, 10.0, Color::new(0.045, 0.04, 0.036, 1.0));
+    // Свод и косяки.
+    draw_rectangle(x - 4.0, base_y - h - 6.0, w + 8.0, 6.0, STONE_DARK);
+    draw_rectangle(x - 4.0, base_y - h - 6.0, w + 8.0, 2.0, STONE_HI);
+    draw_rectangle(x - 4.0, base_y - h, 4.0, h, STONE_DARK);
+    draw_rectangle(x + w, base_y - h, 4.0, h, STONE_DARK);
+    // Замковый камень.
+    draw_rectangle(x + w * 0.5 - 4.0, base_y - h - 10.0, 8.0, 5.0, STONE[1]);
+    draw_rectangle(x + w * 0.5 - 4.0, base_y - h - 10.0, 8.0, 1.5, STONE_HI);
+    // Руна: тусклое золото, пульсирует — зовёт войти.
+    let pulse = 0.55 + 0.45 * (time * 2.0).sin();
+    draw_rectangle(
+        x + w * 0.5 - 3.0,
+        base_y - h * 0.62,
+        6.0,
+        12.0,
+        Color::new(0.851, 0.643, 0.255, 0.25 + 0.45 * pulse),
+    );
+    draw_rectangle(
+        x + w * 0.5 - 7.0,
+        base_y - h * 0.45,
+        14.0,
+        2.0,
+        Color::new(0.851, 0.643, 0.255, 0.2 + 0.4 * pulse),
+    );
+    draw_circle(
+        x + w * 0.5,
+        base_y - h * 0.5,
+        30.0,
+        Color::new(0.851, 0.643, 0.255, 0.03 + 0.03 * pulse),
+    );
+    // Порог.
+    draw_rectangle(x - 6.0, base_y, w + 12.0, 4.0, STONE_DARK);
+    draw_rectangle(x - 6.0, base_y, w + 12.0, 1.5, STONE_HI);
 }
 
 /// Рыцарь: послойная пиксельная отрисовка — обводка силуэта, бевели
