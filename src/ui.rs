@@ -71,7 +71,9 @@ pub struct TouchUi {
 impl TouchUi {
     pub fn new() -> Self {
         TouchUi {
-            enabled: false,
+            // На Android панель видна сразу; на ПК — появляется после
+            // первого касания (чтобы не мешать клавиатурной игре).
+            enabled: cfg!(target_os = "android"),
             stick_finger: None,
             stick_origin: Vec2::ZERO,
             stick_knob: Vec2::ZERO,

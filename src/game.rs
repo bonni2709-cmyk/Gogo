@@ -116,6 +116,8 @@ struct Mover {
     range: f32,
     speed: f32,
     phase: f32,
+    /// Крушитель: обрушивается вниз по циклу вместо синуса.
+    crusher: bool,
     /// Текущее смещение по оси (обновляется каждый фиксированный шаг).
     offset: f32,
     /// Дельта смещения за последний шаг — на неё переносим игрока.
@@ -131,13 +133,31 @@ impl Mover {
             range: def.range,
             speed: def.speed,
             phase: def.phase,
+            crusher: def.crusher,
             offset: 0.0,
             delta: 0.0,
         }
     }
 
     fn advance(&mut self, time: f32) {
-        let off = (time * self.speed + self.phase).sin() * self.range;
+        let off = if self.crusher {
+            // Цикл крушителя: висение → обвал (разгон) → пауза → медленный
+            // подъём. Фазы детерминированы по времени.
+            let p = (time * self.speed + self.phase).rem_euclid(1.0);
+            if p < 0.10 {
+                0.0
+            } else if p < 0.18 {
+                let q = (p - 0.10) / 0.08;
+                self.range * q * q
+            } else if p < 0.34 {
+                self.range
+            } else {
+                let q = (p - 0.34) / 0.66;
+                self.range * (1.0 - q)
+            }
+        } else {
+            (time * self.speed + self.phase).sin() * self.range
+        };
         self.delta = off - self.offset;
         self.offset = off;
     }
@@ -390,6 +410,18 @@ impl Game {
             if !pb.overlaps(&r) {
                 continue;
             }
+            // Шипы на дне крушителя: касание — урон (i-frames игрока решают).
+            if m.crusher {
+                let dir = if pb.center().x >= r.center().x {
+                    1.0
+                } else {
+                    -1.0
+                };
+                if self.player.take_damage(2, dir) {
+                    self.particles.hit_spark(pb.center(), dir);
+                    self.hitstop = self.hitstop.max(0.06);
+                }
+            }
             let push_up = pb.bottom() - r.top();
             let push_down = r.bottom() - pb.top();
             let push_left = pb.right() - r.left();
@@ -559,28 +591,138 @@ impl Game {
         if self.paused {
             let w = screen_width();
             let h = screen_height();
-            draw_rectangle(0.0, 0.0, w, h, Color::new(0.02, 0.016, 0.014, 0.62));
+            draw_rectangle(0.0, 0.0, w, h, Color::new(0.02, 0.016, 0.014, 0.68));
+
+            let panel_bg = Color::new(0.05, 0.04, 0.035, 0.94);
+            let panel_y = h * 0.5 - 112.0;
+            let panel_h = 224.0;
+
+            // ---------- левая панель: КАРТА УРОВНЯ ----------
+            let mp_x = 20.0;
+            let mp_w = (w * 0.48).max(280.0);
+            draw_rectangle(mp_x, panel_y, mp_w, panel_h, panel_bg);
+            draw_rectangle_lines(mp_x, panel_y, mp_w, panel_h, 2.0, GOLD_DARK);
+            draw_text("MAP", mp_x + 14.0, panel_y + 26.0, 20.0, GOLD);
+
+            // Весь уровень 96x20 тайлов, сжатый в панель.
+            let map_w = mp_w - 28.0;
+            let sc = map_w / (96.0 * TILE);
+            let map_h = 20.0 * TILE * sc;
+            let ox = mp_x + 14.0;
+            let oy = panel_y + 42.0;
             draw_rectangle(
-                w * 0.5 - 150.0,
-                h * 0.5 - 52.0,
-                300.0,
-                104.0,
-                Color::new(0.05, 0.04, 0.035, 0.9),
+                ox - 2.0,
+                oy - 2.0,
+                map_w + 4.0,
+                map_h + 4.0,
+                Color::new(0.03, 0.026, 0.022, 1.0),
             );
-            draw_rectangle_lines(
-                w * 0.5 - 150.0,
-                h * 0.5 - 52.0,
-                300.0,
-                104.0,
-                2.0,
-                GOLD_DARK,
+            // Твёрдая геометрия уровня.
+            for solid in self.world.query(Aabb::new(0.0, 0.0, 96.0 * TILE, 20.0 * TILE)) {
+                draw_rectangle(
+                    ox + solid.pos.x * sc,
+                    oy + solid.pos.y * sc,
+                    (solid.size.x * sc).max(1.0),
+                    (solid.size.y * sc).max(1.5),
+                    Color::new(0.45, 0.42, 0.36, 0.95),
+                );
+            }
+            // Чекпоинты: зажжённые — золото, потухшие — тусклые.
+            for cp in &self.checkpoints {
+                let c = if cp.lit {
+                    GOLD
+                } else {
+                    Color::new(0.30, 0.27, 0.24, 0.8)
+                };
+                draw_rectangle(ox + cp.pos.x * sc - 1.5, oy + cp.pos.y * sc - 1.5, 3.0, 3.0, c);
+            }
+            // Босс: кровавая метка.
+            for (_, t, b, _) in self.enemies.iter() {
+                if b.kind == EnemyKind::DeathKnight {
+                    let c = t.center();
+                    draw_rectangle(
+                        ox + c.x * sc - 2.0,
+                        oy + c.y * sc - 2.0,
+                        4.0,
+                        4.0,
+                        Color::new(0.62, 0.20, 0.12, 0.95),
+                    );
+                }
+            }
+            // Игрок: мигающая точка.
+            if ((self.time * 3.0) as i32) % 2 == 0 {
+                let c = self.player.body().center();
+                draw_rectangle(ox + c.x * sc - 2.0, oy + c.y * sc - 2.0, 4.0, 4.0, TEXT_MAIN);
+            }
+            draw_text(
+                "gold dots - checkpoints, red - boss",
+                mp_x + 14.0,
+                oy + map_h + 18.0,
+                16.0,
+                TEXT_DIM,
             );
-            draw_text("PAUSED", w * 0.5 - 52.0, h * 0.5 - 8.0, 36.0, TEXT_MAIN);
+
+            // ---------- правая панель: СНАРЯЖЕНИЕ ----------
+            let sp_x = mp_x + mp_w + 20.0;
+            let sp_w = w - sp_x - 20.0;
+            draw_rectangle(sp_x, panel_y, sp_w, panel_h, panel_bg);
+            draw_rectangle_lines(sp_x, panel_y, sp_w, panel_h, 2.0, GOLD_DARK);
+            draw_text("GEAR", sp_x + 14.0, panel_y + 26.0, 20.0, GOLD);
+
+            // Сердца (сетка по 6 в ряд).
+            for i in 0..self.player.max_hp {
+                let row = i / 6;
+                let col = i % 6;
+                draw_heart(
+                    sp_x + 14.0 + col as f32 * 20.0,
+                    panel_y + 38.0 + row as f32 * 20.0,
+                    i < self.player.hp,
+                );
+            }
+            // Мана-полоска.
+            draw_rectangle(sp_x + 14.0, panel_y + 84.0, 80.0, 6.0, OUTLINE);
+            draw_rectangle(
+                sp_x + 15.0,
+                panel_y + 85.0,
+                78.0 * (self.mana / 100.0),
+                4.0,
+                Color::new(0.62, 0.70, 0.78, 0.95),
+            );
+            draw_text("MANA", sp_x + 102.0, panel_y + 91.0, 16.0, TEXT_DIM);
+            // Золото.
+            draw_circle(sp_x + 20.0, panel_y + 108.0, 5.0, GOLD);
+            draw_text(
+                &format!("x {}", self.gold),
+                sp_x + 30.0,
+                panel_y + 113.0,
+                18.0,
+                TEXT_MAIN,
+            );
+            // Ячейки предметов: меч и сапоги рывка.
+            let items = [("SWORD", "ATK 1"), ("DASH BOOTS", "25 MANA")];
+            for (i, (name, note)) in items.into_iter().enumerate() {
+                let iy = panel_y + 128.0 + i as f32 * 30.0;
+                draw_rectangle(sp_x + 14.0, iy, 22.0, 22.0, OUTLINE);
+                draw_rectangle(sp_x + 16.0, iy + 2.0, 18.0, 18.0, Color::new(0.14, 0.12, 0.10, 1.0));
+                draw_rectangle_lines(sp_x + 14.0, iy, 22.0, 22.0, 1.0, GOLD_DARK);
+                if i == 0 {
+                    // Меч в ячейке.
+                    draw_rectangle(sp_x + 24.0, iy + 3.0, 3.0, 12.0, STEEL_HI);
+                    draw_rectangle(sp_x + 21.0, iy + 14.0, 9.0, 2.0, GOLD);
+                    draw_rectangle(sp_x + 24.5, iy + 16.0, 2.0, 3.0, LEATHER);
+                } else {
+                    // Сапог рывка.
+                    draw_rectangle(sp_x + 19.0, iy + 6.0, 7.0, 10.0, LEATHER);
+                    draw_rectangle(sp_x + 19.0, iy + 14.0, 12.0, 4.0, STEEL_DARK);
+                }
+                draw_text(name, sp_x + 44.0, iy + 14.0, 18.0, TEXT_MAIN);
+                draw_text(note, sp_x + 150.0, iy + 14.0, 16.0, TEXT_DIM);
+            }
             draw_text(
                 "tap pause / press P to resume",
-                w * 0.5 - 108.0,
-                h * 0.5 + 26.0,
-                18.0,
+                sp_x + 14.0,
+                panel_y + panel_h - 10.0,
+                16.0,
                 TEXT_DIM,
             );
         }
@@ -1546,7 +1688,7 @@ fn draw_checkpoints(checkpoints: &[Checkpoint], time: f32) {
     }
 }
 
-/// Движущиеся платформы: древние плиты с пульсирующей руной и скобами.
+/// Движущиеся платформы: плиты с рунами — либо крушители на цепях.
 fn draw_movers(movers: &[Mover], time: f32) {
     for m in movers {
         let r = m.rect();
@@ -1554,39 +1696,76 @@ fn draw_movers(movers: &[Mover], time: f32) {
         let y = r.pos.y;
         let w = r.size.x;
         let h = r.size.y;
-        // Плита с каменной кладкой.
-        draw_rectangle(x, y, w, h, STONE_DARK);
-        draw_rectangle(x, y, w, h - 3.0, STONE[1]);
-        draw_rectangle(x, y, w, 2.0, STONE_HI);
-        draw_rectangle(x, y + h - 4.0, w, 2.0, STONE_LO);
-        draw_rectangle(x + w * 0.33, y + 2.0, 1.0, h - 5.0, STONE_DARK);
-        draw_rectangle(x + w * 0.66, y + 2.0, 1.0, h - 5.0, STONE_DARK);
-        // Железные скобы по краям.
-        draw_rectangle(x - 2.0, y + 2.0, 4.0, h - 5.0, IRON);
-        draw_rectangle(x + w - 2.0, y + 2.0, 4.0, h - 5.0, IRON);
-        draw_rectangle(x - 2.0, y + 2.0, 4.0, 2.0, STEEL_HI);
-        draw_rectangle(x + w - 2.0, y + 2.0, 4.0, 2.0, STEEL_HI);
-        // Руна по центру — тёплый пульс.
-        let pulse = 0.55 + 0.45 * (time * 2.2 + m.phase).sin();
-        draw_rectangle(
-            x + w * 0.5 - 4.0,
-            y + h * 0.5 - 3.0,
-            8.0,
-            6.0,
-            Color::new(0.851, 0.643, 0.255, 0.35 + 0.4 * pulse),
-        );
-        draw_rectangle(
-            x + w * 0.5 - 1.0,
-            y + h * 0.5 - 5.0,
-            2.0,
-            10.0,
-            Color::new(0.957, 0.839, 0.541, 0.3 + 0.5 * pulse),
-        );
-        // Свисающие звенья под плитой.
-        for l in 0..3 {
-            let lx = x + 6.0 + l as f32 * (w - 12.0) * 0.5;
-            let sway = (time * 2.0 + l as f32).sin() * 1.5;
-            draw_rectangle(lx + sway, y + h, 2.5, 5.0 + l as f32 * 2.0, STEEL_DARK);
+
+        if m.crusher {
+            // --- крушитель: цепи, массивный блок, костяные шипы снизу ---
+            // Цепи уходят вверх к монтажным плитам.
+            for cx in [x + 8.0, x + w - 12.0] {
+                let mut cy = y - 128.0;
+                while cy < y - 3.0 {
+                    draw_rectangle(cx, cy, 4.0, 5.5, STEEL_DARK);
+                    draw_rectangle(cx, cy, 4.0, 1.5, STEEL_HI);
+                    cy += 7.0;
+                }
+                draw_rectangle(cx - 3.0, y - 133.0, 10.0, 5.0, IRON);
+                draw_rectangle(cx - 3.0, y - 133.0, 10.0, 1.5, STEEL_HI);
+            }
+            // Блок: обводка, камень, железный обод.
+            draw_rectangle(x - 2.0, y - 2.0, w + 4.0, h + 4.0, OUTLINE);
+            draw_rectangle(x, y, w, h - 12.0, STONE[2]);
+            draw_rectangle(x, y, w, 3.0, IRON);
+            draw_rectangle(x, y, w, 1.5, STEEL_HI);
+            draw_rectangle(x, y, 3.0, h - 10.0, STONE_LO);
+            draw_rectangle(x + w - 3.0, y, 3.0, h - 10.0, STONE_LO);
+            // Трещины по блоку.
+            draw_rectangle(x + w * 0.38, y + 6.0, 2.0, 9.0, STONE_LO);
+            draw_rectangle(x + w * 0.38 + 2.0, y + 13.0, 2.0, 5.0, STONE_LO);
+            draw_rectangle(x + w * 0.72, y + 4.0, 2.0, 7.0, STONE_LO);
+            // Костяные шипы на дне (внутри хитбокса).
+            let segs = (w / 12.0).floor() as i32;
+            for s in 0..segs {
+                let sx = x + s as f32 * 12.0;
+                draw_rectangle(sx + 1.0, y + h - 8.0, 10.0, 8.0, BONE);
+                draw_rectangle(sx + 3.5, y + h - 12.0, 5.0, 5.0, BONE);
+                draw_rectangle(sx + 5.0, y + h - 15.0, 2.0, 4.0, BONE);
+                draw_rectangle(sx + 8.0, y + h - 11.0, 1.5, 9.0, Color::new(0.90, 0.87, 0.78, 1.0));
+            }
+            // Ржавые заклёпки по ободу.
+            for rx in [x + 4.0, x + w * 0.5, x + w - 6.0] {
+                draw_rectangle(rx, y + 1.0, 2.0, 2.0, RUST_W);
+            }
+        } else {
+            // --- обычная плита: кладка, скобы, руна ---
+            draw_rectangle(x, y, w, h, STONE_DARK);
+            draw_rectangle(x, y, w, h - 3.0, STONE[1]);
+            draw_rectangle(x, y, w, 2.0, STONE_HI);
+            draw_rectangle(x, y + h - 4.0, w, 2.0, STONE_LO);
+            draw_rectangle(x + w * 0.33, y + 2.0, 1.0, h - 5.0, STONE_DARK);
+            draw_rectangle(x + w * 0.66, y + 2.0, 1.0, h - 5.0, STONE_DARK);
+            draw_rectangle(x - 2.0, y + 2.0, 4.0, h - 5.0, IRON);
+            draw_rectangle(x + w - 2.0, y + 2.0, 4.0, h - 5.0, IRON);
+            draw_rectangle(x - 2.0, y + 2.0, 4.0, 2.0, STEEL_HI);
+            draw_rectangle(x + w - 2.0, y + 2.0, 4.0, 2.0, STEEL_HI);
+            let pulse = 0.55 + 0.45 * (time * 2.2 + m.phase).sin();
+            draw_rectangle(
+                x + w * 0.5 - 4.0,
+                y + h * 0.5 - 3.0,
+                8.0,
+                6.0,
+                Color::new(0.851, 0.643, 0.255, 0.35 + 0.4 * pulse),
+            );
+            draw_rectangle(
+                x + w * 0.5 - 1.0,
+                y + h * 0.5 - 5.0,
+                2.0,
+                10.0,
+                Color::new(0.957, 0.839, 0.541, 0.3 + 0.5 * pulse),
+            );
+            for l in 0..3 {
+                let lx = x + 6.0 + l as f32 * (w - 12.0) * 0.5;
+                let sway = (time * 2.0 + l as f32).sin() * 1.5;
+                draw_rectangle(lx + sway, y + h, 2.5, 5.0 + l as f32 * 2.0, STEEL_DARK);
+            }
         }
     }
 }

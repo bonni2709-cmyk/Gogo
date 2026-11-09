@@ -77,6 +77,8 @@ pub struct MoverDef {
     pub speed: f32,
     /// Начальная фаза.
     pub phase: f32,
+    /// Крушитель: висит наверху, обрушивается вниз, медленно поднимается.
+    pub crusher: bool,
 }
 
 // --- структуры десериализации Tiled-JSON (только нужные поля) ---
@@ -140,6 +142,9 @@ impl TiledProp {
     }
     fn text(&self) -> Option<&str> {
         self.value.as_str()
+    }
+    fn flag(&self) -> bool {
+        self.value.as_bool().unwrap_or(false)
     }
 }
 
@@ -226,12 +231,14 @@ pub fn parse(json: &str) -> LevelData {
                             let mut range = 48.0f32;
                             let mut speed = 1.0f32;
                             let mut phase = 0.0f32;
+                            let mut crusher = false;
                             for p in &o.properties {
                                 match p.name.as_str() {
                                     "axis" => axis_x = p.text() == Some("x"),
                                     "range" => range = p.num().unwrap_or(range),
                                     "speed" => speed = p.num().unwrap_or(speed),
                                     "phase" => phase = p.num().unwrap_or(phase),
+                                    "crusher" => crusher = p.flag(),
                                     _ => {}
                                 }
                             }
@@ -244,6 +251,7 @@ pub fn parse(json: &str) -> LevelData {
                                 range,
                                 speed,
                                 phase,
+                                crusher,
                             });
                         }
                         "spikes" => spikes.push(Aabb::new(
@@ -302,7 +310,11 @@ mod tests {
             .enemy_spawns
             .iter()
             .any(|(k, _)| matches!(k, EnemyKind::Cultist)));
-        assert_eq!(lvl.movers.len(), 2, "две движущиеся платформы");
+        assert_eq!(lvl.movers.len(), 4, "лифт, челнок и два крушителя");
+        assert!(lvl.movers[2].crusher, "третья платформа — крушитель");
+        assert!(lvl.movers[3].crusher, "четвёртая платформа — крушитель");
+        assert!((lvl.movers[2].range - 154.0).abs() < 0.01, "ход крушителя 154 px");
+        assert!((lvl.movers[3].phase - 0.5).abs() < 0.01, "крушители в противофазе");
         assert_eq!(lvl.spikes.len(), 2, "две зоны шипов");
         assert_eq!(lvl.checkpoints.len(), 2, "два чекпоинта");
         assert_eq!(lvl.coins.len(), 9, "девять монет");
