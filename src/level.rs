@@ -313,7 +313,7 @@ mod tests {
 
     #[test]
     fn level1_parses_with_expected_content() {
-        let lvl = load_level1();
+        let lvl = load_level(0);
         assert_eq!(lvl.spawn.x, 96.0);
         assert_eq!(lvl.spawn.y, 410.0);
         assert_eq!(lvl.enemy_spawns.len(), 8, "8 врагов на уровне");
@@ -370,7 +370,7 @@ mod tests {
 
     #[test]
     fn level1_geometry_is_solid_where_expected() {
-        let lvl = load_level1();
+        let lvl = load_level(0);
         // Пол в стартовом зале — твёрдый.
         assert!(lvl
             .world
@@ -394,7 +394,7 @@ mod tests {
 
     #[test]
     fn mover_defs_carry_tuned_properties() {
-        let lvl = load_level1();
+        let lvl = load_level(0);
         let shuttle = &lvl.movers[0];
         assert!(shuttle.axis_x, "челнок над ямой ходит по X");
         assert!((shuttle.range - 48.0).abs() < 0.01);
